@@ -164,6 +164,8 @@ public final class HackList implements UpdateListener
 	public final RadarHack radarHack = new RadarHack();
 	public final RainbowUiHack rainbowUiHack = new RainbowUiHack();
 	public final ReachHack reachHack = new ReachHack();
+	public final RealisticAfkGrindHack realisticAfkGrindHack =
+		new RealisticAfkGrindHack();
 	public final RemoteViewHack remoteViewHack = new RemoteViewHack();
 	public final RestockHack restockHack = new RestockHack();
 	public final SafeWalkHack safeWalkHack = new SafeWalkHack();
