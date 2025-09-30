@@ -61,8 +61,7 @@ dependencies {
 	// In other words, Wurst won't compile without this library,
 	// even though it's Minecraft that actually uses it.
 	modImplementation "com.google.code.findbugs:jsr305:3.0.2"
-
-	// HTTP + JSON
+  // HTTP + JSON
 	implementation 'com.squareup.okhttp3:okhttp:4.12.0'
 	implementation 'com.google.code.gson:gson:2.10.1'
 }
@@ -117,10 +116,11 @@ tasks.register('runEndToEndTest', JavaExec) {
 }
 
 processResources {
-	inputs.property "version", project.version.substring(1)
+	def modVersion = project.version.substring(1)
+	inputs.property("version", modVersion)
 	
 	filesMatching("fabric.mod.json") {
-		expand "version": inputs.properties.version
+		expand(version: modVersion)
 	}
 }
 
@@ -140,10 +140,11 @@ java {
 }
 
 jar {
-	inputs.property "archivesName", project.base.archivesName
+	def archivesName = project.base.archivesName
+	inputs.property("archivesName", archivesName)
 	
 	from("LICENSE.txt") {
-		rename { "LICENSE-${inputs.properties.archivesName}.txt" }
+		rename { "LICENSE-${archivesName}.txt" }
 	}
 	
 	exclude("intentionally_untranslated.json")
