@@ -7,6 +7,9 @@
  */
 package net.wurstclient.hacks;
 
+import java.util.Arrays;
+import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.Comparator;
 import java.util.function.ToDoubleFunction;
 import java.util.stream.Stream;
@@ -36,6 +39,8 @@ import net.wurstclient.util.BlockUtils;
 import net.wurstclient.util.EntityUtils;
 import net.wurstclient.util.RenderUtils;
 import net.wurstclient.util.RotationUtils;
+import net.minecraft.entity.player.PlayerEntity;
+import net.wurstclient.settings.TextFieldSetting;
 
 @SearchTags({"kill aura", "ForceField", "force field", "CrystalAura",
 	"crystal aura", "AutoCrystal", "auto crystal"})
@@ -77,6 +82,15 @@ public final class KillauraHack extends Hack
 		"Renders a colored box within the target, inversely proportional to its remaining health.",
 		true);
 	
+	// ...
+	private final EntityFilterList entityFilters =
+		EntityFilterList.genericCombat();
+	
+	// NEW: Ignore players setting (comma-separated, case-insensitive)
+	private final TextFieldSetting ignorePlayers = new TextFieldSetting(
+		"Ignore players",
+		"Comma-separated list of usernames to ignore (case-insensitive).", "");
+	
 	private final PauseAttackOnContainersSetting pauseOnContainers =
 		new PauseAttackOnContainersSetting(true);
 	
@@ -85,9 +99,6 @@ public final class KillauraHack extends Hack
 			"Ensures that you don't reach through blocks when attacking.\n\n"
 				+ "Slower but can help with anti-cheat plugins.",
 			false);
-	
-	private final EntityFilterList entityFilters =
-		EntityFilterList.genericCombat();
 	
 	private Entity target;
 	private Entity renderTarget;
@@ -106,6 +117,7 @@ public final class KillauraHack extends Hack
 		addSetting(damageIndicator);
 		addSetting(pauseOnContainers);
 		addSetting(checkLOS);
+		addSetting(ignorePlayers);
 		
 		entityFilters.forEach(this::addSetting);
 	}
@@ -161,6 +173,32 @@ public final class KillauraHack extends Hack
 		
 		stream = entityFilters.applyTo(stream);
 		
+		// NEW: apply ignore players filter
+		Set<String> excluded = parseIgnorePlayers();
+		if(!excluded.isEmpty())
+		{
+			stream = stream.filter(e -> {
+				if(e instanceof PlayerEntity p)
+				{
+					// prefer game profile name if available
+					String name;
+					try
+					{
+						// try player's display name (getName()) then fallback
+						name = p.getGameProfile() != null
+							&& p.getGameProfile().getName() != null
+								? p.getGameProfile().getName()
+								: p.getName().getString();
+					}catch(Throwable t)
+					{
+						name = p.getName().getString();
+					}
+					return !excluded.contains(name.toLowerCase());
+				}
+				return true;
+			});
+		}
+		
 		target = stream.min(priority.getSelected().comparator).orElse(null);
 		renderTarget = target;
 		if(target == null)
@@ -176,6 +214,16 @@ public final class KillauraHack extends Hack
 		}
 		
 		WURST.getRotationFaker().faceVectorPacket(hitVec);
+	}
+	
+	private Set<String> parseIgnorePlayers()
+	{
+		String txt = ignorePlayers.getValue();
+		if(txt == null)
+			return java.util.Collections.emptySet();
+		return Arrays.stream(txt.split(",")).map(String::trim)
+			.filter(s -> !s.isEmpty()).map(String::toLowerCase)
+			.collect(Collectors.toSet());
 	}
 	
 	@Override
