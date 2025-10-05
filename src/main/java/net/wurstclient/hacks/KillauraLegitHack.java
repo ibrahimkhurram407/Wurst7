@@ -7,14 +7,18 @@
  */
 package net.wurstclient.hacks;
 
+import java.util.Arrays;
 import java.util.Comparator;
+import java.util.Set;
 import java.util.function.ToDoubleFunction;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import net.minecraft.client.gui.screen.ingame.HandledScreen;
 import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.LivingEntity;
+import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.util.Hand;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.MathHelper;
@@ -31,6 +35,7 @@ import net.wurstclient.settings.SliderSetting;
 import net.wurstclient.settings.SliderSetting.ValueDisplay;
 import net.wurstclient.settings.SwingHandSetting;
 import net.wurstclient.settings.SwingHandSetting.SwingHand;
+import net.wurstclient.settings.TextFieldSetting;
 import net.wurstclient.settings.filterlists.EntityFilterList;
 import net.wurstclient.settings.filters.*;
 import net.wurstclient.util.BlockUtils;
@@ -113,6 +118,11 @@ public final class KillauraLegitHack extends Hack implements UpdateListener,
 			FilterArmorStandsSetting.genericCombat(false),
 			FilterCrystalsSetting.genericCombat(false));
 	
+	// NEW: comma-separated ignore list (case-insensitive)
+	private final TextFieldSetting ignorePlayers = new TextFieldSetting(
+		"Ignore players",
+		"Comma-separated list of usernames to ignore (case-insensitive).", "");
+	
 	private Entity target;
 	private float nextYaw;
 	private float nextPitch;
@@ -130,6 +140,9 @@ public final class KillauraLegitHack extends Hack implements UpdateListener,
 		addSetting(fov);
 		addSetting(swingHand);
 		addSetting(damageIndicator);
+		
+		// add the new setting to the UI
+		addSetting(ignorePlayers);
 		
 		entityFilters.forEach(this::addSetting);
 	}
@@ -183,6 +196,30 @@ public final class KillauraLegitHack extends Hack implements UpdateListener,
 				e.getBoundingBox().getCenter()) <= fov.getValue() / 2.0);
 		
 		stream = entityFilters.applyTo(stream);
+		
+		// NEW: filter out ignored players (case-insensitive)
+		Set<String> excluded = parseIgnorePlayers();
+		if(!excluded.isEmpty())
+		{
+			stream = stream.filter(e -> {
+				if(e instanceof PlayerEntity p)
+				{
+					String name;
+					try
+					{
+						name = p.getGameProfile() != null
+							&& p.getGameProfile().getName() != null
+								? p.getGameProfile().getName()
+								: p.getName().getString();
+					}catch(Throwable t)
+					{
+						name = p.getName().getString();
+					}
+					return !excluded.contains(name.toLowerCase());
+				}
+				return true;
+			});
+		}
 		
 		target = stream.min(priority.getSelected().comparator).orElse(null);
 		if(target == null)
@@ -261,6 +298,28 @@ public final class KillauraLegitHack extends Hack implements UpdateListener,
 		if(target == null || !damageIndicator.isChecked())
 			return;
 		
+		// skip highlighting if target is in ignore list
+		Set<String> excluded = parseIgnorePlayers();
+		if(!excluded.isEmpty())
+		{
+			if(target instanceof PlayerEntity p)
+			{
+				String name;
+				try
+				{
+					name = p.getGameProfile() != null
+						&& p.getGameProfile().getName() != null
+							? p.getGameProfile().getName()
+							: p.getName().getString();
+				}catch(Throwable t)
+				{
+					name = p.getName().getString();
+				}
+				if(excluded.contains(name.toLowerCase()))
+					return;
+			}
+		}
+		
 		float p = 1;
 		if(target instanceof LivingEntity le)
 			p = (le.getMaxHealth() - le.getHealth()) / le.getMaxHealth();
@@ -278,6 +337,17 @@ public final class KillauraLegitHack extends Hack implements UpdateListener,
 		
 		RenderUtils.drawSolidBox(matrixStack, box, quadColor, false);
 		RenderUtils.drawOutlinedBox(matrixStack, box, lineColor, false);
+	}
+	
+	// helper to parse the comma separated field into a lower-case set
+	private Set<String> parseIgnorePlayers()
+	{
+		String txt = ignorePlayers.getValue();
+		if(txt == null || txt.isBlank())
+			return java.util.Collections.emptySet();
+		return Arrays.stream(txt.split(",")).map(String::trim)
+			.filter(s -> !s.isEmpty()).map(String::toLowerCase)
+			.collect(Collectors.toSet());
 	}
 	
 	private enum Priority
