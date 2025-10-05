@@ -188,12 +188,11 @@ public class ClientPlayerEntityMixin extends AbstractClientPlayerEntity
 	}
 	
 	@Override
-	public void setVelocityClient(Vec3d vec)
+	public void setVelocityClient(double x, double y, double z)
 	{
-		KnockbackEvent event = new KnockbackEvent(vec.x, vec.y, vec.z);
+		KnockbackEvent event = new KnockbackEvent(x, y, z);
 		EventManager.fire(event);
-		super.setVelocityClient(
-			new Vec3d(event.getX(), event.getY(), event.getZ()));
+		super.setVelocityClient(event.getX(), event.getY(), event.getZ());
 	}
 	
 	@Override

@@ -7,7 +7,6 @@
  */
 package net.wurstclient.clickgui.screens;
 
-import net.minecraft.client.gui.Click;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.Drawable;
 import net.minecraft.client.gui.screen.Screen;
@@ -31,17 +30,17 @@ public final class ClickGuiScreen extends Screen
 	}
 	
 	@Override
-	public boolean mouseClicked(Click context, boolean doubleClick)
+	public boolean mouseClicked(double mouseX, double mouseY, int mouseButton)
 	{
-		gui.handleMouseClick(context);
-		return super.mouseClicked(context, doubleClick);
+		gui.handleMouseClick((int)mouseX, (int)mouseY, mouseButton);
+		return super.mouseClicked(mouseX, mouseY, mouseButton);
 	}
 	
 	@Override
-	public boolean mouseReleased(Click context)
+	public boolean mouseReleased(double mouseX, double mouseY, int mouseButton)
 	{
-		gui.handleMouseRelease(context.x(), context.y(), context.button());
-		return super.mouseReleased(context);
+		gui.handleMouseRelease(mouseX, mouseY, mouseButton);
+		return super.mouseReleased(mouseX, mouseY, mouseButton);
 	}
 	
 	@Override

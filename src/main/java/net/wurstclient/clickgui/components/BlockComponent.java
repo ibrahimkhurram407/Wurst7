@@ -12,7 +12,6 @@ import org.lwjgl.glfw.GLFW;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.client.font.TextRenderer;
-import net.minecraft.client.gui.Click;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.item.ItemStack;
 import net.wurstclient.clickgui.ClickGui;
@@ -38,8 +37,7 @@ public final class BlockComponent extends Component
 	}
 	
 	@Override
-	public void handleMouseClick(double mouseX, double mouseY, int mouseButton,
-		Click context)
+	public void handleMouseClick(double mouseX, double mouseY, int mouseButton)
 	{
 		if(mouseX < getX() + getWidth() - BLOCK_WITDH)
 			return;
@@ -90,6 +88,8 @@ public final class BlockComponent extends Component
 		// block
 		ItemStack stack = new ItemStack(setting.getBlock());
 		RenderUtils.drawItem(context, stack, x3, y1, true);
+		
+		context.state.goDownLayer();
 	}
 	
 	private boolean isHovering(int mouseX, int mouseY, int x1, int y1, int x2,

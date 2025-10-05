@@ -12,19 +12,16 @@ import java.io.File;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
-import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
-import com.llamalad7.mixinextras.sugar.Local;
 import com.mojang.authlib.GameProfile;
 import com.mojang.authlib.minecraft.UserApiService;
 import com.mojang.authlib.yggdrasil.YggdrasilAuthenticationService;
 
 import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.RunArgs;
 import net.minecraft.client.WindowEventHandler;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.client.network.ClientPlayerInteractionManager;
@@ -55,9 +52,9 @@ public abstract class MinecraftClientMixin
 	public ClientPlayerInteractionManager interactionManager;
 	@Shadow
 	public ClientPlayerEntity player;
-	
-	@Unique
-	private YggdrasilAuthenticationService wurstAuthenticationService;
+	@Shadow
+	@Final
+	private YggdrasilAuthenticationService authenticationService;
 	
 	private Session wurstSession;
 	private ProfileKeys wurstProfileKeys;
@@ -65,15 +62,6 @@ public abstract class MinecraftClientMixin
 	private MinecraftClientMixin(WurstClient wurst, String name)
 	{
 		super(name);
-	}
-	
-	@Inject(at = @At(value = "INVOKE",
-		target = "Lnet/minecraft/util/ApiServices;create(Lcom/mojang/authlib/yggdrasil/YggdrasilAuthenticationService;Ljava/io/File;)Lnet/minecraft/util/ApiServices;",
-		shift = At.Shift.AFTER), method = "<init>")
-	private void captureAuthenticationService(RunArgs args, CallbackInfo ci,
-		@Local YggdrasilAuthenticationService yggdrasilAuthenticationService)
-	{
-		wurstAuthenticationService = yggdrasilAuthenticationService;
 	}
 	
 	/**
@@ -168,7 +156,8 @@ public abstract class MinecraftClientMixin
 		
 		GameProfile oldProfile = cir.getReturnValue();
 		GameProfile newProfile = new GameProfile(wurstSession.getUuidOrNull(),
-			wurstSession.getUsername(), oldProfile.properties());
+			wurstSession.getUsername());
+		newProfile.getProperties().putAll(oldProfile.getProperties());
 		cir.setReturnValue(newProfile);
 	}
 	
@@ -233,11 +222,11 @@ public abstract class MinecraftClientMixin
 			return;
 		}
 		
-		String accessToken = session.getAccessToken();
-		boolean isOffline = accessToken == null || accessToken.isBlank()
-			|| accessToken.equals("0") || accessToken.equals("null");
-		UserApiService userApiService = isOffline ? UserApiService.OFFLINE
-			: wurstAuthenticationService.createUserApiService(accessToken);
+		UserApiService userApiService =
+			session.getAccountType() == Session.AccountType.MSA
+				? authenticationService.createUserApiService(
+					session.getAccessToken())
+				: UserApiService.OFFLINE;
 		wurstProfileKeys =
 			ProfileKeys.create(userApiService, session, runDirectory.toPath());
 	}

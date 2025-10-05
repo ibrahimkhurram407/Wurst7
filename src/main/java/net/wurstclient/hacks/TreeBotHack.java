@@ -348,7 +348,7 @@ public final class TreeBotHack extends Hack
 	{
 		public TreeFinder()
 		{
-			super(BlockPos.ofFloored(WurstClient.MC.player.getEntityPos()));
+			super(BlockPos.ofFloored(WurstClient.MC.player.getPos()));
 		}
 		
 		public TreeFinder(TreeBotPathFinder pathFinder)
@@ -427,7 +427,7 @@ public final class TreeBotHack extends Hack
 	{
 		public AngleFinder()
 		{
-			super(BlockPos.ofFloored(WurstClient.MC.player.getEntityPos()));
+			super(BlockPos.ofFloored(WurstClient.MC.player.getPos()));
 			setThinkSpeed(512);
 			setThinkTime(1);
 		}

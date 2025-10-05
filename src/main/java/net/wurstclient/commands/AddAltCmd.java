@@ -61,7 +61,7 @@ public final class AddAltCmd extends Command
 		
 		for(PlayerListEntry entry : MC.player.networkHandler.getPlayerList())
 		{
-			String name = entry.getProfile().name();
+			String name = entry.getProfile().getName();
 			name = StringHelper.stripTextFormat(name);
 			
 			if(altManager.contains(name))

@@ -19,7 +19,6 @@ import net.minecraft.client.gui.screen.ConfirmScreen;
 import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.widget.AlwaysSelectedEntryListWidget;
 import net.minecraft.client.gui.widget.ButtonWidget;
-import net.minecraft.client.input.KeyInput;
 import net.minecraft.text.Text;
 import net.minecraft.util.Colors;
 import net.wurstclient.WurstClient;
@@ -103,30 +102,30 @@ public final class KeybindManagerScreen extends Screen
 	}
 	
 	@Override
-	public boolean keyPressed(KeyInput context)
+	public boolean keyPressed(int keyCode, int scanCode, int modifiers)
 	{
-		switch(context.key())
+		switch(keyCode)
 		{
 			case GLFW.GLFW_KEY_ENTER:
 			if(editButton.active)
-				editButton.onPress(context);
+				editButton.onPress();
 			else
-				addButton.onPress(context);
+				addButton.onPress();
 			break;
 			
 			case GLFW.GLFW_KEY_DELETE:
-			removeButton.onPress(context);
+			removeButton.onPress();
 			break;
 			
 			case GLFW.GLFW_KEY_ESCAPE:
-			backButton.onPress(context);
+			backButton.onPress();
 			break;
 			
 			default:
 			break;
 		}
 		
-		return super.keyPressed(context);
+		return super.keyPressed(keyCode, scanCode, modifiers);
 	}
 	
 	@Override
@@ -177,12 +176,10 @@ public final class KeybindManagerScreen extends Screen
 		}
 		
 		@Override
-		public void render(DrawContext context, int mouseX, int mouseY,
+		public void render(DrawContext context, int index, int y, int x,
+			int entryWidth, int entryHeight, int mouseX, int mouseY,
 			boolean hovered, float tickDelta)
 		{
-			int x = getContentX();
-			int y = getContentY();
-			
 			TextRenderer tr = client.textRenderer;
 			
 			String keyText =
@@ -201,7 +198,7 @@ public final class KeybindManagerScreen extends Screen
 	{
 		public ListGui(MinecraftClient mc, KeybindManagerScreen screen)
 		{
-			super(mc, screen.width, screen.height - 96, 36, 30);
+			super(mc, screen.width, screen.height - 96, 36, 30, 0);
 			
 			WurstClient.INSTANCE.getKeybinds().getAllKeybinds().stream()
 				.map(KeybindManagerScreen.Entry::new).forEach(this::addEntry);

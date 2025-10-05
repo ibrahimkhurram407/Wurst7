@@ -147,6 +147,7 @@ public final class HackListHUD implements UpdateListener
 		context.drawText(tr, s, posX + 1, posY + 1, Colors.BLACK, false);
 		context.state.goUpLayer();
 		context.drawText(tr, s, posX, posY, textColor | Colors.BLACK, false);
+		context.state.goDownLayer();
 		
 		posY += 9;
 	}
@@ -176,6 +177,7 @@ public final class HackListHUD implements UpdateListener
 			false);
 		context.state.goUpLayer();
 		context.drawText(tr, s, (int)posX, posY, textColor | alpha, false);
+		context.state.goDownLayer();
 		
 		posY += 9;
 	}

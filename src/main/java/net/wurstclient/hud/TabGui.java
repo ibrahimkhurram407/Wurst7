@@ -143,6 +143,7 @@ public final class TabGui implements KeyPressListener
 			context.drawText(tr, tabName, 2, textY, txtColor, false);
 			textY += 10;
 		}
+		context.state.goDownLayer();
 		
 		context.disableScissor();
 		
@@ -172,11 +173,13 @@ public final class TabGui implements KeyPressListener
 				context.drawText(tr, fName, 2, tabTextY, txtColor, false);
 				tabTextY += 10;
 			}
+			context.state.goDownLayer();
 			
 			context.disableScissor();
 			matrixStack.popMatrix();
 		}
 		
+		context.state.goDownLayer();
 		matrixStack.popMatrix();
 	}
 	

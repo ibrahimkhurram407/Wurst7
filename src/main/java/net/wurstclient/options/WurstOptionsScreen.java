@@ -18,7 +18,6 @@ import net.minecraft.client.gui.Drawable;
 import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.widget.ButtonWidget;
 import net.minecraft.client.gui.widget.ClickableWidget;
-import net.minecraft.client.input.AbstractInput;
 import net.minecraft.text.Text;
 import net.minecraft.util.Colors;
 import net.minecraft.util.Util;
@@ -229,9 +228,9 @@ public class WurstOptionsScreen extends Screen
 		}
 		
 		@Override
-		public void onPress(AbstractInput context)
+		public void onPress()
 		{
-			super.onPress(context);
+			super.onPress();
 			setMessage(Text.literal(messageSupplier.get()));
 		}
 	}

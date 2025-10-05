@@ -13,6 +13,7 @@ import net.minecraft.client.gui.screen.multiplayer.MultiplayerScreen;
 import net.minecraft.client.network.ServerAddress;
 import net.minecraft.client.network.ServerInfo;
 import net.wurstclient.WurstClient;
+import net.wurstclient.mixinterface.IMultiplayerScreen;
 
 /**
  * Remembers the last server you joined to make the "Reconnect",
@@ -39,7 +40,7 @@ public enum LastServerRememberer
 		if(lastServer == null)
 			return;
 		
-		mpScreen.connect(lastServer);
+		((IMultiplayerScreen)mpScreen).connectToServer(lastServer);
 	}
 	
 	public static void reconnect(Screen prevScreen)

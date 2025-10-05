@@ -103,7 +103,8 @@ public enum MicrosoftLoginManager
 		MinecraftProfile mcProfile = getAccount(email, password);
 		
 		Session session = new Session(mcProfile.getName(), mcProfile.getUUID(),
-			mcProfile.getAccessToken(), Optional.empty(), Optional.empty());
+			mcProfile.getAccessToken(), Optional.empty(), Optional.empty(),
+			Session.AccountType.MSA);
 		
 		WurstClient.IMC.setWurstSession(session);
 	}

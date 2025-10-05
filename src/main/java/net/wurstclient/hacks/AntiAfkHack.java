@@ -119,7 +119,7 @@ public final class AntiAfkHack extends Hack
 	@Override
 	protected void onEnable()
 	{
-		start = BlockPos.ofFloored(MC.player.getEntityPos());
+		start = BlockPos.ofFloored(MC.player.getPos());
 		nextBlock = null;
 		pathFinder =
 			new RandomPathFinder(randomize(start, aiRange.getValueI(), true));

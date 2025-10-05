@@ -73,7 +73,7 @@ public final class ForcedChatReportsScreen extends Screen
 	{
 		reasonFormatted =
 			MultilineText.create(textRenderer, reason, width - 50);
-		reasonHeight = reasonFormatted.getLineCount() * textRenderer.fontHeight;
+		reasonHeight = reasonFormatted.count() * textRenderer.fontHeight;
 		
 		int buttonX = width / 2 - 100;
 		int belowReasonY =
@@ -113,8 +113,7 @@ public final class ForcedChatReportsScreen extends Screen
 		
 		context.drawCenteredTextWithShadow(textRenderer, title, centerX, titleY,
 			Colors.LIGHT_GRAY);
-		reasonFormatted.draw(context, MultilineText.Alignment.CENTER, centerX,
-			reasonY, 9, true, -1);
+		reasonFormatted.drawCenterWithShadow(context, centerX, reasonY);
 		
 		for(Drawable drawable : drawables)
 			drawable.render(context, mouseX, mouseY, partialTicks);

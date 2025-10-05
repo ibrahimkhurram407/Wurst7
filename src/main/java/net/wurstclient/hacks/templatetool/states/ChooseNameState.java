@@ -18,7 +18,6 @@ import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.widget.ButtonWidget;
 import net.minecraft.client.gui.widget.CheckboxWidget;
 import net.minecraft.client.gui.widget.TextFieldWidget;
-import net.minecraft.client.input.KeyInput;
 import net.minecraft.screen.ScreenTexts;
 import net.minecraft.text.Text;
 import net.minecraft.util.Colors;
@@ -120,20 +119,20 @@ public final class ChooseNameState extends TemplateToolState
 		}
 		
 		@Override
-		public boolean keyPressed(KeyInput context)
+		public boolean keyPressed(int keyCode, int scanCode, int modifiers)
 		{
-			switch(context.key())
+			switch(keyCode)
 			{
 				case GLFW.GLFW_KEY_ESCAPE:
-				cancelButton.onPress(context);
+				cancelButton.onPress();
 				break;
 				
 				case GLFW.GLFW_KEY_ENTER:
-				doneButton.onPress(context);
+				doneButton.onPress();
 				break;
 			}
 			
-			return super.keyPressed(context);
+			return super.keyPressed(keyCode, scanCode, modifiers);
 		}
 		
 		@Override

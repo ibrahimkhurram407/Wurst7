@@ -56,7 +56,7 @@ public final class DamageCmd extends Command
 	
 	private void applyDamage(int amount)
 	{
-		Vec3d pos = MC.player.getEntityPos();
+		Vec3d pos = MC.player.getPos();
 		
 		for(int i = 0; i < 80; i++)
 		{

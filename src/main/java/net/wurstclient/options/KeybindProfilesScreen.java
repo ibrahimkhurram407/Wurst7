@@ -22,7 +22,6 @@ import net.minecraft.client.gui.Drawable;
 import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.widget.AlwaysSelectedEntryListWidget;
 import net.minecraft.client.gui.widget.ButtonWidget;
-import net.minecraft.client.input.KeyInput;
 import net.minecraft.text.Text;
 import net.minecraft.util.Colors;
 import net.minecraft.util.Util;
@@ -113,14 +112,14 @@ public final class KeybindProfilesScreen extends Screen
 	}
 	
 	@Override
-	public boolean keyPressed(KeyInput context)
+	public boolean keyPressed(int keyCode, int scanCode, int int_3)
 	{
-		if(context.key() == GLFW.GLFW_KEY_ENTER)
+		if(keyCode == GLFW.GLFW_KEY_ENTER)
 			loadSelected();
-		else if(context.key() == GLFW.GLFW_KEY_ESCAPE)
+		else if(keyCode == GLFW.GLFW_KEY_ESCAPE)
 			client.setScreen(prevScreen);
 		
-		return super.keyPressed(context);
+		return super.keyPressed(keyCode, scanCode, int_3);
 	}
 	
 	@Override
@@ -171,12 +170,10 @@ public final class KeybindProfilesScreen extends Screen
 		}
 		
 		@Override
-		public void render(DrawContext context, int mouseX, int mouseY,
+		public void render(DrawContext context, int index, int y, int x,
+			int entryWidth, int entryHeight, int mouseX, int mouseY,
 			boolean hovered, float tickDelta)
 		{
-			int x = getContentX();
-			int y = getContentY();
-			
 			TextRenderer tr = client.textRenderer;
 			
 			String fileName = "" + path.getFileName();
@@ -195,7 +192,7 @@ public final class KeybindProfilesScreen extends Screen
 		public ListGui(MinecraftClient mc, KeybindProfilesScreen screen,
 			List<Path> list)
 		{
-			super(mc, screen.width, screen.height - 96, 36, 20);
+			super(mc, screen.width, screen.height - 96, 36, 20, 0);
 			
 			list.stream().map(KeybindProfilesScreen.Entry::new)
 				.forEach(this::addEntry);
