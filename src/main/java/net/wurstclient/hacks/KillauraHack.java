@@ -180,23 +180,12 @@ public final class KillauraHack extends Hack
 			stream = stream.filter(e -> {
 				if(e instanceof PlayerEntity p)
 				{
-					// prefer game profile name if available
-					String name;
-					try
-					{
-						// try player's display name (getName()) then fallback
-						name = p.getGameProfile() != null
-							&& p.getGameProfile().getName() != null
-								? p.getGameProfile().getName()
-								: p.getName().getString();
-					}catch(Throwable t)
-					{
-						name = p.getName().getString();
-					}
-					return !excluded.contains(name.toLowerCase());
+					String lname = getPlayerDisplayNameLower(p);
+					return !excluded.contains(lname);
 				}
 				return true;
 			});
+			
 		}
 		
 		target = stream.min(priority.getSelected().comparator).orElse(null);
@@ -224,6 +213,21 @@ public final class KillauraHack extends Hack
 		return Arrays.stream(txt.split(",")).map(String::trim)
 			.filter(s -> !s.isEmpty()).map(String::toLowerCase)
 			.collect(Collectors.toSet());
+	}
+	
+	private static String getPlayerDisplayNameLower(PlayerEntity p)
+	{
+		try
+		{
+			// Use display name Text -> string (works in all mappings)
+			String n = p.getName().getString();
+			return n == null ? "" : n.toLowerCase().trim();
+		}catch(Throwable t)
+		{
+			// Fallback to toString in extreme cases
+			String n = p.toString();
+			return n == null ? "" : n.toLowerCase().trim();
+		}
 	}
 	
 	@Override

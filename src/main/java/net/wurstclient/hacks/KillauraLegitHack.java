@@ -204,21 +204,12 @@ public final class KillauraLegitHack extends Hack implements UpdateListener,
 			stream = stream.filter(e -> {
 				if(e instanceof PlayerEntity p)
 				{
-					String name;
-					try
-					{
-						name = p.getGameProfile() != null
-							&& p.getGameProfile().getName() != null
-								? p.getGameProfile().getName()
-								: p.getName().getString();
-					}catch(Throwable t)
-					{
-						name = p.getName().getString();
-					}
-					return !excluded.contains(name.toLowerCase());
+					String lname = getPlayerDisplayNameLower(p);
+					return !excluded.contains(lname);
 				}
 				return true;
 			});
+			
 		}
 		
 		target = stream.min(priority.getSelected().comparator).orElse(null);
@@ -304,20 +295,11 @@ public final class KillauraLegitHack extends Hack implements UpdateListener,
 		{
 			if(target instanceof PlayerEntity p)
 			{
-				String name;
-				try
-				{
-					name = p.getGameProfile() != null
-						&& p.getGameProfile().getName() != null
-							? p.getGameProfile().getName()
-							: p.getName().getString();
-				}catch(Throwable t)
-				{
-					name = p.getName().getString();
-				}
-				if(excluded.contains(name.toLowerCase()))
+				String lname = getPlayerDisplayNameLower(p);
+				if(excluded.contains(lname))
 					return;
 			}
+			
 		}
 		
 		float p = 1;
@@ -348,6 +330,21 @@ public final class KillauraLegitHack extends Hack implements UpdateListener,
 		return Arrays.stream(txt.split(",")).map(String::trim)
 			.filter(s -> !s.isEmpty()).map(String::toLowerCase)
 			.collect(Collectors.toSet());
+	}
+	
+	private static String getPlayerDisplayNameLower(PlayerEntity p)
+	{
+		try
+		{
+			// Use display name Text -> string (works in all mappings)
+			String n = p.getName().getString();
+			return n == null ? "" : n.toLowerCase().trim();
+		}catch(Throwable t)
+		{
+			// Fallback to toString in extreme cases
+			String n = p.toString();
+			return n == null ? "" : n.toLowerCase().trim();
+		}
 	}
 	
 	private enum Priority
