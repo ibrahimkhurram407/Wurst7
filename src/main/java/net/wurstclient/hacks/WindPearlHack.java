@@ -23,6 +23,7 @@ import net.wurstclient.WurstClient;
 import net.wurstclient.events.UpdateListener;
 import net.wurstclient.hack.Hack;
 import net.wurstclient.mixinterface.IMinecraftClient;
+import net.wurstclient.settings.CheckboxSetting;
 import net.wurstclient.settings.SliderSetting;
 import net.wurstclient.settings.SliderSetting.ValueDisplay;
 import net.wurstclient.util.InventoryUtils;
@@ -40,27 +41,39 @@ public final class WindPearlHack extends Hack implements UpdateListener
 		BURSTED
 	}
 	
-	// Now: delay between PEARL and WIND BURST
+	// Delay between PEARL and WIND BURST
 	private final SliderSetting delayMs = new SliderSetting("Delay (ms)",
 		"Delay between Ender Pearl throw and Wind Burst placement.", 300, 0,
 		1500, 10, ValueDisplay.INTEGER);
 	
+	// New: optionally restore AutoMace after we finish (only if it was on
+	// before)
+	private final CheckboxSetting reenableAutoMace =
+		new CheckboxSetting("Re-enable AutoMace when done",
+			"If ON, AutoMace will be turned back on after WindPearl finishes\n"
+				+ "(only if it was enabled before WindPearl started).",
+			true);
+	
 	private Phase phase = Phase.IDLE;
 	private long t0ns = 0L;
+	private boolean autoMaceWasOn = false;
 	
 	public WindPearlHack()
 	{
 		super("WindPearl");
 		setCategory(Category.COMBAT);
 		addSetting(delayMs);
+		addSetting(reenableAutoMace);
 	}
 	
 	@Override
 	protected void onEnable()
 	{
-		// Pause AutoMace while performing the combo
+		// Remember current AutoMace state and pause it while performing the
+		// combo
 		try
 		{
+			autoMaceWasOn = WURST.getHax().autoMaceHack.isEnabled();
 			WURST.getHax().autoMaceHack.setEnabled(false);
 		}catch(Throwable ignored)
 		{}
@@ -74,6 +87,18 @@ public final class WindPearlHack extends Hack implements UpdateListener
 	protected void onDisable()
 	{
 		EVENTS.remove(UpdateListener.class, this);
+		
+		// Restore AutoMace if user wants and it was previously on
+		try
+		{
+			if(reenableAutoMace.isChecked() && autoMaceWasOn)
+			{
+				WURST.getHax().autoMaceHack.setEnabled(true);
+			}
+		}catch(Throwable ignored)
+		{}
+		
+		autoMaceWasOn = false;
 	}
 	
 	@Override
@@ -115,7 +140,8 @@ public final class WindPearlHack extends Hack implements UpdateListener
 			
 			case BURSTED ->
 			{
-				// Step 3: clean exit
+				// Step 3: clean exit (onDisable will handle AutoMace
+				// restoration)
 				setEnabled(false);
 			}
 		}
@@ -161,8 +187,7 @@ public final class WindPearlHack extends Hack implements UpdateListener
 				at);
 		}catch(Throwable t)
 		{
-			// optional fallback: generic right click (comment out if you only
-			// want precise placement)
+			// optional fallback: generic right click
 			try
 			{
 				IMC.getInteractionManager().rightClickItem();
