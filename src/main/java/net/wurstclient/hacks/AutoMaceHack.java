@@ -171,19 +171,18 @@ public final class AutoMaceHack extends Hack
 		
 		// === Transition-based auto-equip ===
 		// === Enforce desired chest item every tick (no transition gating) ===
+		// === Auto-equip chest item ===
 		if(autoEquipEnabled.isChecked())
 		{
 			if(!onGround)
 			{
-				// Airborne: Elytra if pref ON, otherwise armor
+				// Airborne
 				if(preferElytraAir.isChecked())
 				{
 					// want Elytra in air
 					if(MC.player.getEquippedStack(EquipmentSlot.CHEST)
 						.getItem() != Items.ELYTRA)
-					{
 						equipElytraByUse();
-					}
 				}else
 				{
 					// want armor in air
@@ -191,19 +190,23 @@ public final class AutoMaceHack extends Hack
 						.getItem() == Items.ELYTRA
 						|| MC.player.getEquippedStack(EquipmentSlot.CHEST)
 							.isEmpty())
-					{
 						ensureArmorEquippedByUse();
-					}
 				}
 			}else
 			{
-				// Grounded: always armor (if Elytra on, swap to armor)
-				if(MC.player.getEquippedStack(EquipmentSlot.CHEST)
-					.getItem() == Items.ELYTRA
-					|| MC.player.getEquippedStack(EquipmentSlot.CHEST)
-						.isEmpty())
+				// Grounded
+				if(preferElytraAir.isChecked())
 				{
-					ensureArmorEquippedByUse();
+					// User prefers Elytra: DO NOTHING on ground (keep whatever
+					// is worn, including Elytra)
+				}else
+				{
+					// Default behavior: ensure armor on ground
+					if(MC.player.getEquippedStack(EquipmentSlot.CHEST)
+						.getItem() == Items.ELYTRA
+						|| MC.player.getEquippedStack(EquipmentSlot.CHEST)
+							.isEmpty())
+						ensureArmorEquippedByUse();
 				}
 			}
 		}
