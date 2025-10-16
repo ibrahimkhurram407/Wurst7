@@ -133,7 +133,7 @@ public final class WindPearlHack extends Hack implements UpdateListener
 				if(System.nanoTime() - t0ns >= waitNs)
 				{
 					tryWindBurstAtFeet(); // best-effort; even if it fails we
-											// end
+					// end
 					phase = Phase.BURSTED;
 				}
 			}
