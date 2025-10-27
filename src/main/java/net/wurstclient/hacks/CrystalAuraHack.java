@@ -9,6 +9,8 @@ package net.wurstclient.hacks;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Locale;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -20,6 +22,7 @@ import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.decoration.EndCrystalEntity;
+import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.util.Hand;
@@ -43,6 +46,7 @@ import net.wurstclient.settings.SliderSetting;
 import net.wurstclient.settings.SliderSetting.ValueDisplay;
 import net.wurstclient.settings.SwingHandSetting;
 import net.wurstclient.settings.SwingHandSetting.SwingHand;
+import net.wurstclient.settings.TextFieldSetting;
 import net.wurstclient.settings.filterlists.CrystalAuraFilterList;
 import net.wurstclient.settings.filterlists.EntityFilterList;
 import net.wurstclient.util.BlockUtils;
@@ -84,7 +88,27 @@ public final class CrystalAuraHack extends Hack implements UpdateListener
 	private final EntityFilterList entityFilters =
 		CrystalAuraFilterList.create();
 	
-	/* ===== NEW: legit mode & speed control ===== */
+	/* ===== NEW: player targeting controls ===== */
+	private enum PlayerTargetMode
+	{
+		ALL,
+		ONLY_LIST,
+		IGNORE_LIST
+	}
+	
+	private final EnumSetting<PlayerTargetMode> playerTargetMode =
+		new EnumSetting<>("Target players mode",
+			"ALL = target all players (default)\n"
+				+ "ONLY_LIST = target only players in the list (no mobs)\n"
+				+ "IGNORE_LIST = target everyone except listed players",
+			PlayerTargetMode.values(), PlayerTargetMode.ALL);
+	
+	private final TextFieldSetting playerListCsv = new TextFieldSetting(
+		"Player list (comma-separated)",
+		"Usernames separated by commas, case-insensitive.\nUsed by ONLY_LIST and IGNORE_LIST modes.",
+		"");
+	
+	/* ===== Legit mode & speed control ===== */
 	private final CheckboxSetting legitMode = new CheckboxSetting(
 		"Legit mode (hotbar only)",
 		"Visibly switch to End Crystal on hotbar and only act inside a cone in front of you.",
@@ -109,7 +133,7 @@ public final class CrystalAuraHack extends Hack implements UpdateListener
 		"Actions per second", "Max rate of place/break actions.", 6, 1, 20, 1,
 		ValueDisplay.INTEGER);
 	
-	/* ===== NEW: legit sequencer ===== */
+	/* ===== Legit sequencer ===== */
 	private enum LegitAction
 	{
 		NONE,
@@ -118,11 +142,10 @@ public final class CrystalAuraHack extends Hack implements UpdateListener
 	}
 	
 	private LegitAction pending = LegitAction.NONE;
-	private BlockPos pendingPlacePos = null; // for PLACE: target block position
-												// to click
-	private Direction pendingPlaceSide = null; // for PLACE: neighbor side we
-												// click on
-	private EndCrystalEntity pendingBreak = null; // for BREAK
+	private BlockPos pendingPlacePos = null;
+	private Direction pendingPlaceSide = null;
+	private net.minecraft.entity.decoration.EndCrystalEntity pendingBreak =
+		null;
 	private int crystalSlot = -1;
 	private long useAtNs = 0L;
 	private long restoreAtNs = 0L;
@@ -142,7 +165,11 @@ public final class CrystalAuraHack extends Hack implements UpdateListener
 		addSetting(swingHand);
 		addSetting(takeItemsFrom);
 		
-		// new settings
+		// new player targeting settings
+		addSetting(playerTargetMode);
+		addSetting(playerListCsv);
+		
+		// legit & speed
 		addSetting(legitMode);
 		addSetting(frontConeDeg);
 		addSetting(legitPreDelayMs);
@@ -226,6 +253,47 @@ public final class CrystalAuraHack extends Hack implements UpdateListener
 		}
 	}
 	
+	/* ==================== Player list helpers ==================== */
+	
+	private Set<String> parsePlayerListLower()
+	{
+		return Stream.of(playerListCsv.getValue().split(",")).map(String::trim)
+			.filter(s -> !s.isEmpty()).map(s -> s.toLowerCase(Locale.ROOT))
+			.collect(Collectors.toSet());
+	}
+	
+	private boolean isPlayerAllowed(Entity e, Set<String> list)
+	{
+		if(!(e instanceof PlayerEntity p))
+		{
+			// For ONLY_LIST we *only* target listed players (exclude mobs).
+			// For ALL / IGNORE_LIST, non-players keep flowing (other filters
+			// apply).
+			return playerTargetMode.getSelected() != PlayerTargetMode.ONLY_LIST;
+		}
+		
+		String name;
+		try
+		{
+			name = p.getName().getString();
+		}catch(Throwable t)
+		{
+			name = null;
+		}
+		String lower = name == null ? "" : name.toLowerCase(Locale.ROOT);
+		
+		switch(playerTargetMode.getSelected())
+		{
+			case ONLY_LIST:
+			return list.contains(lower);
+			case IGNORE_LIST:
+			return !list.contains(lower);
+			case ALL:
+			default:
+			return true;
+		}
+	}
+	
 	/* ==================== Legit driver ==================== */
 	
 	private boolean legitActive()
@@ -274,7 +342,7 @@ public final class CrystalAuraHack extends Hack implements UpdateListener
 		pending = LegitAction.PLACE;
 		pendingPlacePos = pos;
 		pendingPlaceSide = side;
-		crystalSlot = crystalSlotIdx; // we will stay on this slot
+		crystalSlot = crystalSlotIdx; // stay on this slot
 		selectHotbar(crystalSlot);
 		
 		int pre = Math.max(legitPreDelayMs.getValueI(), 60);
@@ -351,10 +419,9 @@ public final class CrystalAuraHack extends Hack implements UpdateListener
 			restoreAtNs = now + TimeUnit.MILLISECONDS.toNanos(post);
 		}
 		
-		// We “stay” on crystal slot -> just finish the sequence, no reselect.
+		// stay on crystal slot
 		if(restoreAtNs != 0L && now >= restoreAtNs)
 		{
-			// ensure we’re still on crystal slot (harmless reselect)
 			if(crystalSlot >= 0)
 				selectHotbar(crystalSlot);
 			clearLegit();
@@ -378,7 +445,6 @@ public final class CrystalAuraHack extends Hack implements UpdateListener
 				int slot = findHotbarSlot(s -> s.isOf(Items.END_CRYSTAL));
 				if(slot == -1)
 					return false; // legit requires crystal on hotbar
-				// Optional LOS check to match behavior:
 				if(checkLOS.isChecked() && !hasEntityLineOfSight(center))
 					continue;
 				
@@ -386,8 +452,6 @@ public final class CrystalAuraHack extends Hack implements UpdateListener
 				return true; // scheduled
 			}else
 			{
-				// Non-legit: no need to hold crystal, but we *can* if you
-				// prefer
 				faceBlocks.getSelected().face(center);
 				MC.interactionManager.attackEntity(MC.player, e);
 				swingHand.swing(Hand.MAIN_HAND);
@@ -468,10 +532,7 @@ public final class CrystalAuraHack extends Hack implements UpdateListener
 		return true;
 	}
 	
-	/*
-	 * ==================== Original helpers (filtered to front cone in callers)
-	 * ====================
-	 */
+	/* ==================== Discovery helpers ==================== */
 	
 	private ArrayList<Entity> getNearbyCrystals()
 	{
@@ -497,16 +558,19 @@ public final class CrystalAuraHack extends Hack implements UpdateListener
 			.<Entity> comparingDouble(e -> MC.player.squaredDistanceTo(e))
 			.reversed();
 		
-		Stream<Entity> stream =
-			StreamSupport.stream(MC.world.getEntities().spliterator(), false)
-				.filter(e -> !e.isRemoved())
-				.filter(e -> e instanceof LivingEntity
-					&& ((LivingEntity)e).getHealth() > 0)
-				.filter(e -> e != MC.player)
-				.filter(e -> !(e instanceof FakePlayerEntity))
-				.filter(
-					e -> !WURST.getFriends().contains(e.getName().getString()))
-				.filter(e -> MC.player.squaredDistanceTo(e) <= rangeSq);
+		final Set<String> list = parsePlayerListLower();
+		
+		Stream<Entity> stream = StreamSupport
+			.stream(MC.world.getEntities().spliterator(), false)
+			.filter(e -> !e.isRemoved())
+			.filter(e -> e instanceof LivingEntity
+				&& ((LivingEntity)e).getHealth() > 0)
+			.filter(e -> e != MC.player)
+			.filter(e -> !(e instanceof FakePlayerEntity))
+			.filter(e -> !WURST.getFriends().contains(e.getName().getString()))
+			.filter(e -> MC.player.squaredDistanceTo(e) <= rangeSq)
+			// NEW: player allow/deny logic
+			.filter(e -> isPlayerAllowed(e, list));
 		
 		stream = entityFilters.applyTo(stream);
 		return stream.sorted(furthestFromPlayer)

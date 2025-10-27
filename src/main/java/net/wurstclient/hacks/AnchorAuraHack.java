@@ -9,7 +9,9 @@ package net.wurstclient.hacks;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -19,6 +21,7 @@ import net.minecraft.block.Blocks;
 import net.minecraft.block.RespawnAnchorBlock;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.LivingEntity;
+import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.util.Hand;
@@ -42,6 +45,7 @@ import net.wurstclient.settings.SliderSetting;
 import net.wurstclient.settings.SliderSetting.ValueDisplay;
 import net.wurstclient.settings.SwingHandSetting;
 import net.wurstclient.settings.SwingHandSetting.SwingHand;
+import net.wurstclient.settings.TextFieldSetting;
 import net.wurstclient.settings.filterlists.AnchorAuraFilterList;
 import net.wurstclient.settings.filterlists.EntityFilterList;
 import net.wurstclient.util.BlockUtils;
@@ -83,6 +87,26 @@ public final class AnchorAuraHack extends Hack implements UpdateListener
 	
 	private final EntityFilterList entityFilters =
 		AnchorAuraFilterList.create();
+	
+	/* ===== NEW: player targeting controls ===== */
+	private enum PlayerTargetMode
+	{
+		ALL,
+		ONLY_LIST,
+		IGNORE_LIST
+	}
+	
+	private final EnumSetting<PlayerTargetMode> playerTargetMode =
+		new EnumSetting<>("Target players mode",
+			"ALL = target all players (default)\n"
+				+ "ONLY_LIST = target only players in the list (no mobs)\n"
+				+ "IGNORE_LIST = target everyone except listed players",
+			PlayerTargetMode.values(), PlayerTargetMode.ALL);
+	
+	private final TextFieldSetting playerListCsv = new TextFieldSetting(
+		"Player list (comma-separated)",
+		"Usernames separated by commas, case-insensitive.\nUsed by ONLY_LIST and IGNORE_LIST modes.",
+		"");
 	
 	// ===== NEW: legit & speed control =====
 	private final CheckboxSetting legitMode = new CheckboxSetting(
@@ -141,7 +165,11 @@ public final class AnchorAuraHack extends Hack implements UpdateListener
 		addSetting(swingHand);
 		addSetting(takeItemsFrom);
 		
-		// new settings
+		// new player targeting settings
+		addSetting(playerTargetMode);
+		addSetting(playerListCsv);
+		
+		// legit & speed
 		addSetting(legitMode);
 		addSetting(frontConeDeg);
 		addSetting(legitPreDelayMs);
@@ -233,8 +261,7 @@ public final class AnchorAuraHack extends Hack implements UpdateListener
 			if(!placed.isEmpty()
 				&& InventoryUtils.indexOf(Items.GLOWSTONE, maxInvSlot) >= 0)
 			{
-				// we won’t chain multiple actions in the same tick in legit;
-				// sequencer will handle timing
+				// non-legit can chain immediately; legit timing is sequenced
 				if(!legitMode.isChecked())
 				{
 					charge(placed);
@@ -244,8 +271,47 @@ public final class AnchorAuraHack extends Hack implements UpdateListener
 		}
 	}
 	
-	// ===================== Helpers: legit scheduler =====================
+	// ===================== Player list helpers =====================
+	private Set<String> parsePlayerListLower()
+	{
+		return Stream.of(playerListCsv.getValue().split(",")).map(String::trim)
+			.filter(s -> !s.isEmpty()).map(s -> s.toLowerCase(Locale.ROOT))
+			.collect(Collectors.toSet());
+	}
 	
+	private boolean isPlayerAllowed(Entity e, Set<String> list)
+	{
+		if(!(e instanceof PlayerEntity p))
+		{
+			// ONLY_LIST: target players from the list only (exclude mobs)
+			// ALL / IGNORE_LIST: allow non-players to pass (other filters
+			// apply)
+			return playerTargetMode.getSelected() != PlayerTargetMode.ONLY_LIST;
+		}
+		
+		String name;
+		try
+		{
+			name = p.getName().getString();
+		}catch(Throwable t)
+		{
+			name = null;
+		}
+		String lower = name == null ? "" : name.toLowerCase(Locale.ROOT);
+		
+		switch(playerTargetMode.getSelected())
+		{
+			case ONLY_LIST:
+			return list.contains(lower);
+			case IGNORE_LIST:
+			return !list.contains(lower);
+			case ALL:
+			default:
+			return true;
+		}
+	}
+	
+	// ===================== Helpers: legit scheduler =====================
 	private boolean legitActive()
 	{
 		return pending != LegitAction.NONE;
@@ -254,9 +320,7 @@ public final class AnchorAuraHack extends Hack implements UpdateListener
 	private void startLegit(BlockPos pos, Direction side, LegitAction act,
 		int slotToUse)
 	{
-		if(MC.player == null)
-			return;
-		if(legitActive())
+		if(MC.player == null || legitActive())
 			return;
 		
 		pending = act;
@@ -333,7 +397,6 @@ public final class AnchorAuraHack extends Hack implements UpdateListener
 	}
 	
 	// ===================== Front-cone check =====================
-	
 	private boolean inFrontCone(Vec3d worldPoint)
 	{
 		if(!legitMode.isChecked())
@@ -347,7 +410,6 @@ public final class AnchorAuraHack extends Hack implements UpdateListener
 	}
 	
 	// ===================== Selection helpers =====================
-	
 	private int findHotbarSlot(java.util.function.Predicate<ItemStack> pred)
 	{
 		if(MC.player == null)
@@ -363,9 +425,7 @@ public final class AnchorAuraHack extends Hack implements UpdateListener
 	
 	private boolean selectHotbar(int slot)
 	{
-		if(MC.player == null)
-			return false;
-		if(slot < 0 || slot > 8)
+		if(MC.player == null || slot < 0 || slot > 8)
 			return false;
 		MC.player.getInventory().setSelectedSlot(slot);
 		return true;
@@ -373,7 +433,6 @@ public final class AnchorAuraHack extends Hack implements UpdateListener
 	
 	// ===================== Action wrappers (legit or instant)
 	// =====================
-	
 	private boolean legitOrInstantDetonate(ArrayList<BlockPos> charged)
 	{
 		for(BlockPos pos : charged)
@@ -387,8 +446,6 @@ public final class AnchorAuraHack extends Hack implements UpdateListener
 			
 			if(legitMode.isChecked())
 			{
-				// REQUIRE: detonate using the ANCHOR item, not “any
-				// non-glowstone”
 				int anchorSlot = findHotbarSlot(s -> s != null && !s.isEmpty()
 					&& s.isOf(Items.RESPAWN_ANCHOR));
 				if(anchorSlot == -1)
@@ -397,7 +454,6 @@ public final class AnchorAuraHack extends Hack implements UpdateListener
 				return true; // scheduled
 			}else
 			{
-				// non-legit as well: hold anchor before right click
 				InventoryUtils.selectItem(Items.RESPAWN_ANCHOR,
 					takeItemsFrom.getSelected().maxInvSlot);
 				if(!MC.player.isHolding(Items.RESPAWN_ANCHOR))
@@ -444,9 +500,6 @@ public final class AnchorAuraHack extends Hack implements UpdateListener
 		{
 			for(BlockPos pos : getFreeBlocksNear(target))
 			{
-				// we place on the neighbor’s opposite side (same as original
-				// logic)
-				// choose a clickable neighbor side that’s in front
 				for(Direction side : Direction.values())
 				{
 					BlockPos neighbor = pos.offset(side);
@@ -470,7 +523,7 @@ public final class AnchorAuraHack extends Hack implements UpdateListener
 							return newAnchors; // must be in hotbar
 						startLegit(neighbor, side, LegitAction.PLACE,
 							anchorSlot);
-						return newAnchors; // scheduled one placement
+						return newAnchors; // schedule one placement
 					}else
 					{
 						if(placeAnchorDirect(pos, neighbor, side))
@@ -489,7 +542,6 @@ public final class AnchorAuraHack extends Hack implements UpdateListener
 	
 	// ===================== Original actions (non-legit path)
 	// =====================
-	
 	private boolean placeAnchorDirect(BlockPos pos, BlockPos neighbor,
 		Direction side)
 	{
@@ -520,7 +572,6 @@ public final class AnchorAuraHack extends Hack implements UpdateListener
 		if(isSneaking())
 			return;
 		
-		// Hold ANCHOR before clicking to explode
 		InventoryUtils.selectItem(Items.RESPAWN_ANCHOR,
 			takeItemsFrom.getSelected().maxInvSlot);
 		if(!MC.player.isHolding(Items.RESPAWN_ANCHOR))
@@ -590,7 +641,6 @@ public final class AnchorAuraHack extends Hack implements UpdateListener
 	}
 	
 	// ===================== Original discovery helpers =====================
-	
 	private ArrayList<BlockPos> getNearbyAnchors()
 	{
 		Vec3d eyesVec = RotationUtils.getEyesPos().subtract(0.5, 0.5, 0.5);
@@ -616,16 +666,19 @@ public final class AnchorAuraHack extends Hack implements UpdateListener
 			.<Entity> comparingDouble(e -> MC.player.squaredDistanceTo(e))
 			.reversed();
 		
-		Stream<Entity> stream =
-			StreamSupport.stream(MC.world.getEntities().spliterator(), false)
-				.filter(e -> !e.isRemoved())
-				.filter(e -> e instanceof LivingEntity
-					&& ((LivingEntity)e).getHealth() > 0)
-				.filter(e -> e != MC.player)
-				.filter(e -> !(e instanceof FakePlayerEntity))
-				.filter(
-					e -> !WURST.getFriends().contains(e.getName().getString()))
-				.filter(e -> MC.player.squaredDistanceTo(e) <= rangeSq);
+		final Set<String> list = parsePlayerListLower();
+		
+		Stream<Entity> stream = StreamSupport
+			.stream(MC.world.getEntities().spliterator(), false)
+			.filter(e -> !e.isRemoved())
+			.filter(e -> e instanceof LivingEntity
+				&& ((LivingEntity)e).getHealth() > 0)
+			.filter(e -> e != MC.player)
+			.filter(e -> !(e instanceof FakePlayerEntity))
+			.filter(e -> !WURST.getFriends().contains(e.getName().getString()))
+			.filter(e -> MC.player.squaredDistanceTo(e) <= rangeSq)
+			// NEW: player allow/deny logic
+			.filter(e -> isPlayerAllowed(e, list));
 		
 		stream = entityFilters.applyTo(stream);
 		return stream.sorted(furthestFromPlayer)
