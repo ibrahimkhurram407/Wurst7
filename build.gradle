@@ -24,23 +24,23 @@ repositories {
 	// Loom adds the essential maven repositories to download Minecraft and libraries from automatically.
 	// See https://docs.gradle.org/current/userguide/declaring_repositories.html
 	// for more information about repositories.
+	mavenCentral()
+
 }
 
 // Override vulnerable dependencies until Minecraft updates to newer versions
 configurations.all {
 	resolutionStrategy {
-		// v2.5.1, used by Minecraft 1.21.4 - 1.21.10, is vulnerable to CVE-2024-57699
+		// v2.5.1, used by Minecraft 1.21.4 - 1.21.8, is vulnerable to CVE-2024-57699
 		force "net.minidev:json-smart:2.5.2"
-		// v2.13.4, used by Minecraft 1.21.4 - 1.21.10, is vulnerable to CVE-2025-52999
+		// v2.13.4, used by Minecraft 1.21.4 - 1.21.8, is vulnerable to CVE-2025-52999
 		force "com.fasterxml.jackson.core:jackson-core:2.15.0"
-		// v3.17.0, used by Minecraft 1.21.4 - 1.21.10, is vulnerable to CVE-2025-48924
+		// v3.17.0, used by Minecraft 1.21.4 - 1.21.8, is vulnerable to CVE-2025-48924
 		force "org.apache.commons:commons-lang3:3.18.0"
-		// v9.40, used by Minecraft 1.21.4 - 1.21.10, is vulnerable to CVE-2025-53864
+		// v9.40, used by Minecraft 1.21.4 - 1.21.8, is vulnerable to CVE-2025-53864
 		force "com.nimbusds:nimbus-jose-jwt:10.0.2"
-		// v4.1.118.Final, used by Minecraft 1.21.5 - 1.21.10, is vulnerable to CVE-2025-58057
+		// v4.1.118.Final, used by Minecraft 1.21.5 - 1.21.8, is vulnerable to CVE-2025-58057
 		force "io.netty:netty-codec:4.1.125.Final"
-		// v4.1.118.Final, used by Minecraft 1.21.5 - 1.21.10, is vulnerable to CVE-2025-58056
-		force "io.netty:netty-codec-http:4.1.125.Final"
 	}
 }
 
@@ -61,8 +61,11 @@ dependencies {
 	// In other words, Wurst won't compile without this library,
 	// even though it's Minecraft that actually uses it.
 	modImplementation "com.google.code.findbugs:jsr305:3.0.2"
-	}
-	
+  // HTTP + JSON
+	implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+	implementation 'com.google.code.gson:gson:2.10.1'
+}
+
 loom {
 	accessWidenerPath = file("src/main/resources/wurst.accesswidener")
 }
