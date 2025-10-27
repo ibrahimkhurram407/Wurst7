@@ -9,7 +9,10 @@ package net.wurstclient.hacks;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
@@ -18,6 +21,8 @@ import net.minecraft.block.Blocks;
 import net.minecraft.block.RespawnAnchorBlock;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.LivingEntity;
+import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
@@ -25,10 +30,13 @@ import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
+
 import net.wurstclient.Category;
 import net.wurstclient.SearchTags;
+import net.wurstclient.WurstClient;
 import net.wurstclient.events.UpdateListener;
 import net.wurstclient.hack.Hack;
+import net.wurstclient.mixinterface.IMinecraftClient;
 import net.wurstclient.settings.CheckboxSetting;
 import net.wurstclient.settings.EnumSetting;
 import net.wurstclient.settings.FacingSetting;
@@ -37,6 +45,7 @@ import net.wurstclient.settings.SliderSetting;
 import net.wurstclient.settings.SliderSetting.ValueDisplay;
 import net.wurstclient.settings.SwingHandSetting;
 import net.wurstclient.settings.SwingHandSetting.SwingHand;
+import net.wurstclient.settings.TextFieldSetting;
 import net.wurstclient.settings.filterlists.AnchorAuraFilterList;
 import net.wurstclient.settings.filterlists.EntityFilterList;
 import net.wurstclient.util.BlockUtils;
@@ -48,6 +57,10 @@ import net.wurstclient.util.RotationUtils;
 @SearchTags({"anchor aura", "CrystalAura", "crystal aura"})
 public final class AnchorAuraHack extends Hack implements UpdateListener
 {
+	private static final WurstClient WURST = WurstClient.INSTANCE;
+	private static final IMinecraftClient IMC = WurstClient.IMC;
+	
+	// ===== Existing settings =====
 	private final SliderSetting range =
 		new SliderSetting("Range", "description.wurst.setting.anchoraura.range",
 			6, 1, 6, 0.05, ValueDisplay.DECIMAL);
@@ -75,17 +88,93 @@ public final class AnchorAuraHack extends Hack implements UpdateListener
 	private final EntityFilterList entityFilters =
 		AnchorAuraFilterList.create();
 	
+	/* ===== NEW: player targeting controls ===== */
+	private enum PlayerTargetMode
+	{
+		ALL,
+		ONLY_LIST,
+		IGNORE_LIST
+	}
+	
+	private final EnumSetting<PlayerTargetMode> playerTargetMode =
+		new EnumSetting<>("Target players mode",
+			"ALL = target all players (default)\n"
+				+ "ONLY_LIST = target only players in the list (no mobs)\n"
+				+ "IGNORE_LIST = target everyone except listed players",
+			PlayerTargetMode.values(), PlayerTargetMode.ALL);
+	
+	private final TextFieldSetting playerListCsv = new TextFieldSetting(
+		"Player list (comma-separated)",
+		"Usernames separated by commas, case-insensitive.\nUsed by ONLY_LIST and IGNORE_LIST modes.",
+		"");
+	
+	// ===== NEW: legit & speed control =====
+	private final CheckboxSetting legitMode = new CheckboxSetting(
+		"Legit mode (hotbar only)",
+		"Visibly switches to items in hotbar and only interacts with blocks in a cone in front of you.",
+		false);
+	
+	private final SliderSetting frontConeDeg = new SliderSetting(
+		"Front cone (deg)",
+		"Only place/charge/detonate anchors inside this cone in front of you when Legit mode is ON.",
+		45, 10, 70, 1, ValueDisplay.INTEGER);
+	
+	private final SliderSetting legitPreDelayMs =
+		new SliderSetting("Legit pre-switch delay (ms)",
+			"Wait after selecting a hotbar slot before using the item.", 120, 0,
+			600, 10, ValueDisplay.INTEGER);
+	
+	private final SliderSetting legitPostDwellMs =
+		new SliderSetting("Legit post-use dwell (ms)",
+			"Keep the selected slot for a bit after using (looks legit).", 150,
+			0, 1000, 10, ValueDisplay.INTEGER);
+	
+	private final SliderSetting actionsPerSecond = new SliderSetting(
+		"Actions per second", "Max rate of place/charge/detonate actions.", 6,
+		1, 20, 1, ValueDisplay.INTEGER);
+	
+	// ===== NEW: legit sequencer =====
+	private enum LegitAction
+	{
+		NONE,
+		PLACE,
+		CHARGE,
+		DETONATE
+	}
+	
+	private LegitAction pending = LegitAction.NONE;
+	private BlockPos pendingPos = null;
+	private Direction pendingSide = null; // for PLACE/DETONATE click side
+	private int pendingSelectSlot = -1;
+	private int restoreSlot = -1;
+	private long useAtNs = 0L;
+	private long restoreAtNs = 0L;
+	
+	// rate limit (works for both legit & non-legit)
+	private long lastActionNs = 0L;
+	
 	public AnchorAuraHack()
 	{
 		super("AnchorAura");
-		
 		setCategory(Category.COMBAT);
+		
 		addSetting(range);
 		addSetting(autoPlace);
 		addSetting(faceBlocks);
 		addSetting(checkLOS);
 		addSetting(swingHand);
 		addSetting(takeItemsFrom);
+		
+		// new player targeting settings
+		addSetting(playerTargetMode);
+		addSetting(playerListCsv);
+		
+		// legit & speed
+		addSetting(legitMode);
+		addSetting(frontConeDeg);
+		addSetting(legitPreDelayMs);
+		addSetting(legitPostDwellMs);
+		addSetting(actionsPerSecond);
 		
 		entityFilters.forEach(this::addSetting);
 	}
@@ -94,12 +183,26 @@ public final class AnchorAuraHack extends Hack implements UpdateListener
 	protected void onEnable()
 	{
 		EVENTS.add(UpdateListener.class, this);
+		lastActionNs = 0L;
+		clearLegit();
 	}
 	
 	@Override
 	protected void onDisable()
 	{
 		EVENTS.remove(UpdateListener.class, this);
+		clearLegit();
+	}
+	
+	private void clearLegit()
+	{
+		pending = LegitAction.NONE;
+		pendingPos = null;
+		pendingSide = null;
+		pendingSelectSlot = -1;
+		restoreSlot = -1;
+		useAtNs = 0L;
+		restoreAtNs = 0L;
 	}
 	
 	@Override
@@ -109,74 +212,359 @@ public final class AnchorAuraHack extends Hack implements UpdateListener
 		{
 			ChatUtils.error("Respawn anchors don't explode in this dimension.");
 			setEnabled(false);
-		}
-		
-		ArrayList<BlockPos> anchors = getNearbyAnchors();
-		
-		Map<Boolean, ArrayList<BlockPos>> anchorsByCharge = anchors.stream()
-			.collect(Collectors.partitioningBy(this::isChargedAnchor,
-				Collectors.toCollection(ArrayList::new)));
-		
-		ArrayList<BlockPos> chargedAnchors = anchorsByCharge.get(true);
-		ArrayList<BlockPos> unchargedAnchors = anchorsByCharge.get(false);
-		
-		if(!chargedAnchors.isEmpty())
-		{
-			detonate(chargedAnchors);
 			return;
 		}
+		if(MC.player == null)
+			return;
+		
+		final long now = System.nanoTime();
+		driveLegit(now);
+		
+		// obey global action rate limit
+		final long minGapNs =
+			(long)(1_000_000_000d / actionsPerSecond.getValue());
+		boolean canAct = now - lastActionNs >= minGapNs;
+		if(legitMode.isChecked() && legitActive())
+			canAct = false; // sequencer owns the action timing
+			
+		// collection
+		ArrayList<BlockPos> anchors = getNearbyAnchors();
+		Map<Boolean, ArrayList<BlockPos>> byCharge = anchors.stream()
+			.collect(Collectors.partitioningBy(this::isChargedAnchor,
+				Collectors.toCollection(ArrayList::new)));
+		ArrayList<BlockPos> charged = byCharge.get(true);
+		ArrayList<BlockPos> uncharged = byCharge.get(false);
 		
 		int maxInvSlot = takeItemsFrom.getSelected().maxInvSlot;
 		
-		if(!unchargedAnchors.isEmpty()
-			&& InventoryUtils.indexOf(Items.GLOWSTONE, maxInvSlot) >= 0)
+		// DETONATE first (front-cone gated in helpers)
+		if(canAct && !charged.isEmpty())
 		{
-			charge(unchargedAnchors);
-			// TODO: option to wait until next tick?
-			detonate(unchargedAnchors);
-			return;
+			if(legitOrInstantDetonate(charged))
+				return;
 		}
 		
-		if(!autoPlace.isChecked()
-			|| InventoryUtils.indexOf(Items.RESPAWN_ANCHOR, maxInvSlot) == -1)
-			return;
-		
-		ArrayList<Entity> targets = getNearbyTargets();
-		ArrayList<BlockPos> newAnchors = placeAnchorsNear(targets);
-		
-		if(!newAnchors.isEmpty()
+		// CHARGE second
+		if(canAct && !uncharged.isEmpty()
 			&& InventoryUtils.indexOf(Items.GLOWSTONE, maxInvSlot) >= 0)
 		{
-			// TODO: option to wait until next tick?
-			charge(newAnchors);
-			detonate(newAnchors);
+			if(legitOrInstantCharge(uncharged))
+				return;
+		}
+		
+		// PLACE → CHARGE → DETONATE on new blocks
+		if(canAct && autoPlace.isChecked()
+			&& InventoryUtils.indexOf(Items.RESPAWN_ANCHOR, maxInvSlot) != -1)
+		{
+			ArrayList<Entity> targets = getNearbyTargets();
+			ArrayList<BlockPos> placed = legitOrInstantPlaceNear(targets);
+			if(!placed.isEmpty()
+				&& InventoryUtils.indexOf(Items.GLOWSTONE, maxInvSlot) >= 0)
+			{
+				// non-legit can chain immediately; legit timing is sequenced
+				if(!legitMode.isChecked())
+				{
+					charge(placed);
+					detonate(placed);
+				}
+			}
 		}
 	}
 	
-	private ArrayList<BlockPos> placeAnchorsNear(ArrayList<Entity> targets)
+	// ===================== Player list helpers =====================
+	private Set<String> parsePlayerListLower()
 	{
-		ArrayList<BlockPos> newAnchors = new ArrayList<>();
-		
-		boolean shouldSwing = false;
-		for(Entity target : targets)
+		return Stream.of(playerListCsv.getValue().split(",")).map(String::trim)
+			.filter(s -> !s.isEmpty()).map(s -> s.toLowerCase(Locale.ROOT))
+			.collect(Collectors.toSet());
+	}
+	
+	private boolean isPlayerAllowed(Entity e, Set<String> list)
+	{
+		if(!(e instanceof PlayerEntity p))
 		{
-			ArrayList<BlockPos> freeBlocks = getFreeBlocksNear(target);
-			
-			for(BlockPos pos : freeBlocks)
-				if(placeAnchor(pos))
-				{
-					shouldSwing = true;
-					newAnchors.add(pos);
-					
-					// TODO optional speed limit(?)
-					break;
-				}
+			// ONLY_LIST: target players from the list only (exclude mobs)
+			// ALL / IGNORE_LIST: allow non-players to pass (other filters
+			// apply)
+			return playerTargetMode.getSelected() != PlayerTargetMode.ONLY_LIST;
 		}
 		
-		if(shouldSwing)
-			swingHand.swing(Hand.MAIN_HAND);
+		String name;
+		try
+		{
+			name = p.getName().getString();
+		}catch(Throwable t)
+		{
+			name = null;
+		}
+		String lower = name == null ? "" : name.toLowerCase(Locale.ROOT);
 		
+		switch(playerTargetMode.getSelected())
+		{
+			case ONLY_LIST:
+			return list.contains(lower);
+			case IGNORE_LIST:
+			return !list.contains(lower);
+			case ALL:
+			default:
+			return true;
+		}
+	}
+	
+	// ===================== Helpers: legit scheduler =====================
+	private boolean legitActive()
+	{
+		return pending != LegitAction.NONE;
+	}
+	
+	private void startLegit(BlockPos pos, Direction side, LegitAction act,
+		int slotToUse)
+	{
+		if(MC.player == null || legitActive())
+			return;
+		
+		pending = act;
+		pendingPos = pos;
+		pendingSide = side;
+		restoreSlot = MC.player.getInventory().getSelectedSlot();
+		pendingSelectSlot = slotToUse < 0 ? restoreSlot : slotToUse;
+		
+		// visible switch
+		selectHotbar(pendingSelectSlot);
+		
+		int pre = Math.max(legitPreDelayMs.getValueI(), 60);
+		useAtNs = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(pre);
+		restoreAtNs = 0L;
+	}
+	
+	private void driveLegit(long now)
+	{
+		if(!legitActive() || MC.player == null)
+			return;
+		
+		// Use phase
+		if(restoreAtNs == 0L && now >= useAtNs)
+		{
+			try
+			{
+				switch(pending)
+				{
+					case PLACE:
+					{
+						if(pendingPos != null && pendingSide != null)
+						{
+							Vec3d hit = Vec3d.ofCenter(pendingPos).add(Vec3d
+								.of(pendingSide.getVector()).multiply(0.5));
+							IMC.getInteractionManager().rightClickBlock(
+								pendingPos, pendingSide.getOpposite(), hit);
+							swingHand.swing(Hand.MAIN_HAND);
+							lastActionNs = now;
+						}
+						break;
+					}
+					case CHARGE:
+					{
+						IMC.getInteractionManager().rightClickBlock(pendingPos,
+							Direction.UP, Vec3d.ofCenter(pendingPos));
+						swingHand.swing(Hand.MAIN_HAND);
+						lastActionNs = now;
+						break;
+					}
+					case DETONATE:
+					{
+						IMC.getInteractionManager().rightClickBlock(pendingPos,
+							Direction.UP, Vec3d.ofCenter(pendingPos));
+						swingHand.swing(Hand.MAIN_HAND);
+						lastActionNs = now;
+						break;
+					}
+					default:
+					break;
+				}
+			}catch(Throwable ignored)
+			{}
+			
+			int post = Math.max(legitPostDwellMs.getValueI(), 100);
+			restoreAtNs = now + TimeUnit.MILLISECONDS.toNanos(post);
+		}
+		
+		// Restore phase
+		if(restoreAtNs != 0L && now >= restoreAtNs)
+		{
+			selectHotbar(restoreSlot);
+			clearLegit();
+		}
+	}
+	
+	// ===================== Front-cone check =====================
+	private boolean inFrontCone(Vec3d worldPoint)
+	{
+		if(!legitMode.isChecked())
+			return true; // no restriction in non-legit
+		Vec3d eye = RotationUtils.getEyesPos();
+		Vec3d look = MC.player.getRotationVec(1.0F).normalize();
+		Vec3d to = worldPoint.subtract(eye).normalize();
+		double dot = look.dotProduct(to);
+		double minDot = Math.cos(Math.toRadians(frontConeDeg.getValue()));
+		return dot >= minDot;
+	}
+	
+	// ===================== Selection helpers =====================
+	private int findHotbarSlot(java.util.function.Predicate<ItemStack> pred)
+	{
+		if(MC.player == null)
+			return -1;
+		for(int i = 0; i < 9; i++)
+		{
+			ItemStack s = MC.player.getInventory().getStack(i);
+			if(s != null && !s.isEmpty() && pred.test(s))
+				return i;
+		}
+		return -1;
+	}
+	
+	private boolean selectHotbar(int slot)
+	{
+		if(MC.player == null || slot < 0 || slot > 8)
+			return false;
+		MC.player.getInventory().setSelectedSlot(slot);
+		return true;
+	}
+	
+	// ===================== Action wrappers (legit or instant)
+	// =====================
+	private boolean legitOrInstantDetonate(ArrayList<BlockPos> charged)
+	{
+		for(BlockPos pos : charged)
+		{
+			if(!inFrontCone(Vec3d.ofCenter(pos)))
+				continue;
+			if(checkLOS.isChecked()
+				&& !BlockUtils.hasLineOfSight(RotationUtils.getEyesPos(),
+					Vec3d.ofCenter(pos)))
+				continue;
+			
+			if(legitMode.isChecked())
+			{
+				int anchorSlot = findHotbarSlot(s -> s != null && !s.isEmpty()
+					&& s.isOf(Items.RESPAWN_ANCHOR));
+				if(anchorSlot == -1)
+					return false; // legit requires anchor on hotbar
+				startLegit(pos, Direction.UP, LegitAction.DETONATE, anchorSlot);
+				return true; // scheduled
+			}else
+			{
+				InventoryUtils.selectItem(Items.RESPAWN_ANCHOR,
+					takeItemsFrom.getSelected().maxInvSlot);
+				if(!MC.player.isHolding(Items.RESPAWN_ANCHOR))
+					return false;
+				detonate(singleton(pos));
+				return true;
+			}
+		}
+		return false;
+	}
+	
+	private boolean legitOrInstantCharge(ArrayList<BlockPos> uncharged)
+	{
+		for(BlockPos pos : uncharged)
+		{
+			if(!inFrontCone(Vec3d.ofCenter(pos)))
+				continue;
+			if(checkLOS.isChecked()
+				&& !BlockUtils.hasLineOfSight(RotationUtils.getEyesPos(),
+					Vec3d.ofCenter(pos)))
+				continue;
+			
+			if(legitMode.isChecked())
+			{
+				int glowSlot = findHotbarSlot(s -> s.isOf(Items.GLOWSTONE));
+				if(glowSlot == -1)
+					return false;
+				startLegit(pos, Direction.UP, LegitAction.CHARGE, glowSlot);
+				return true;
+			}else
+			{
+				charge(singleton(pos));
+				return true;
+			}
+		}
+		return false;
+	}
+	
+	private ArrayList<BlockPos> legitOrInstantPlaceNear(
+		ArrayList<Entity> targets)
+	{
+		ArrayList<BlockPos> newAnchors = new ArrayList<>();
+		for(Entity target : targets)
+		{
+			for(BlockPos pos : getFreeBlocksNear(target))
+			{
+				for(Direction side : Direction.values())
+				{
+					BlockPos neighbor = pos.offset(side);
+					if(!isClickableNeighbor(neighbor))
+						continue;
+					
+					Vec3d hit = Vec3d.ofCenter(pos)
+						.add(Vec3d.of(side.getVector()).multiply(0.5));
+					if(!inFrontCone(hit))
+						continue;
+					
+					if(checkLOS.isChecked() && !BlockUtils
+						.hasLineOfSight(RotationUtils.getEyesPos(), hit))
+						continue;
+					
+					if(legitMode.isChecked())
+					{
+						int anchorSlot =
+							findHotbarSlot(s -> s.isOf(Items.RESPAWN_ANCHOR));
+						if(anchorSlot == -1)
+							return newAnchors; // must be in hotbar
+						startLegit(neighbor, side, LegitAction.PLACE,
+							anchorSlot);
+						return newAnchors; // schedule one placement
+					}else
+					{
+						if(placeAnchorDirect(pos, neighbor, side))
+						{
+							newAnchors.add(pos);
+							swingHand.swing(Hand.MAIN_HAND);
+							lastActionNs = System.nanoTime();
+							return newAnchors; // 1 per tick due to rate limit
+						}
+					}
+				}
+			}
+		}
 		return newAnchors;
+	}
+	
+	// ===================== Original actions (non-legit path)
+	// =====================
+	private boolean placeAnchorDirect(BlockPos pos, BlockPos neighbor,
+		Direction side)
+	{
+		Vec3d eyesPos = RotationUtils.getEyesPos();
+		double rangeSq = range.getValueSq();
+		Vec3d posVec = Vec3d.ofCenter(pos);
+		Vec3d dirVec = Vec3d.of(side.getVector());
+		Vec3d hitVec = posVec.add(dirVec.multiply(0.5));
+		
+		if(eyesPos.squaredDistanceTo(hitVec) > rangeSq)
+			return false;
+		if(checkLOS.isChecked() && !BlockUtils.hasLineOfSight(eyesPos, hitVec))
+			return false;
+		
+		InventoryUtils.selectItem(Items.RESPAWN_ANCHOR,
+			takeItemsFrom.getSelected().maxInvSlot);
+		if(!MC.player.isHolding(Items.RESPAWN_ANCHOR))
+			return false;
+		
+		faceBlocks.getSelected().face(hitVec);
+		IMC.getInteractionManager().rightClickBlock(neighbor,
+			side.getOpposite(), hitVec);
+		return true;
 	}
 	
 	private void detonate(ArrayList<BlockPos> chargedAnchors)
@@ -184,39 +572,44 @@ public final class AnchorAuraHack extends Hack implements UpdateListener
 		if(isSneaking())
 			return;
 		
-		InventoryUtils.selectItem(stack -> !stack.isOf(Items.GLOWSTONE),
+		InventoryUtils.selectItem(Items.RESPAWN_ANCHOR,
 			takeItemsFrom.getSelected().maxInvSlot);
-		if(MC.player.isHolding(Items.GLOWSTONE))
+		if(!MC.player.isHolding(Items.RESPAWN_ANCHOR))
 			return;
 		
-		boolean shouldSwing = false;
-		
+		boolean swing = false;
 		for(BlockPos pos : chargedAnchors)
+		{
+			if(!inFrontCone(Vec3d.ofCenter(pos)))
+				continue;
 			if(rightClickBlock(pos))
-				shouldSwing = true;
-			
-		if(shouldSwing)
+				swing = true;
+		}
+		if(swing)
 			swingHand.swing(Hand.MAIN_HAND);
+		lastActionNs = System.nanoTime();
 	}
 	
 	private void charge(ArrayList<BlockPos> unchargedAnchors)
 	{
 		if(isSneaking())
 			return;
-		
 		InventoryUtils.selectItem(Items.GLOWSTONE,
 			takeItemsFrom.getSelected().maxInvSlot);
 		if(!MC.player.isHolding(Items.GLOWSTONE))
 			return;
 		
-		boolean shouldSwing = false;
-		
+		boolean swing = false;
 		for(BlockPos pos : unchargedAnchors)
+		{
+			if(!inFrontCone(Vec3d.ofCenter(pos)))
+				continue;
 			if(rightClickBlock(pos))
-				shouldSwing = true;
-			
-		if(shouldSwing)
+				swing = true;
+		}
+		if(swing)
 			swingHand.swing(Hand.MAIN_HAND);
+		lastActionNs = System.nanoTime();
 	}
 	
 	private boolean rightClickBlock(BlockPos pos)
@@ -230,76 +623,24 @@ public final class AnchorAuraHack extends Hack implements UpdateListener
 			Vec3d hitVec = posVec.add(Vec3d.of(side.getVector()).multiply(0.5));
 			double distanceSqHitVec = eyesPos.squaredDistanceTo(hitVec);
 			
-			// check if hitVec is within range (6 blocks)
 			if(distanceSqHitVec > 36)
-				continue;
-			
-			// check if side is facing towards player
+				continue; // <=6 blocks
 			if(distanceSqHitVec >= distanceSqPosVec)
 				continue;
-			
 			if(checkLOS.isChecked()
 				&& !BlockUtils.hasLineOfSight(eyesPos, hitVec))
 				continue;
+			if(!inFrontCone(hitVec))
+				continue;
 			
 			faceBlocks.getSelected().face(hitVec);
-			
-			// place block
 			IMC.getInteractionManager().rightClickBlock(pos, side, hitVec);
-			
 			return true;
 		}
-		
 		return false;
 	}
 	
-	private boolean placeAnchor(BlockPos pos)
-	{
-		Vec3d eyesPos = RotationUtils.getEyesPos();
-		double rangeSq = range.getValueSq();
-		Vec3d posVec = Vec3d.ofCenter(pos);
-		double distanceSqPosVec = eyesPos.squaredDistanceTo(posVec);
-		
-		for(Direction side : Direction.values())
-		{
-			BlockPos neighbor = pos.offset(side);
-			
-			// check if neighbor can be right clicked
-			if(!isClickableNeighbor(neighbor))
-				continue;
-			
-			Vec3d dirVec = Vec3d.of(side.getVector());
-			Vec3d hitVec = posVec.add(dirVec.multiply(0.5));
-			
-			// check if hitVec is within range
-			if(eyesPos.squaredDistanceTo(hitVec) > rangeSq)
-				continue;
-			
-			// check if side is visible (facing away from player)
-			if(distanceSqPosVec > eyesPos.squaredDistanceTo(posVec.add(dirVec)))
-				continue;
-			
-			if(checkLOS.isChecked()
-				&& !BlockUtils.hasLineOfSight(eyesPos, hitVec))
-				continue;
-			
-			InventoryUtils.selectItem(Items.RESPAWN_ANCHOR,
-				takeItemsFrom.getSelected().maxInvSlot);
-			if(!MC.player.isHolding(Items.RESPAWN_ANCHOR))
-				return false;
-			
-			faceBlocks.getSelected().face(hitVec);
-			
-			// place block
-			IMC.getInteractionManager().rightClickBlock(neighbor,
-				side.getOpposite(), hitVec);
-			
-			return true;
-		}
-		
-		return false;
-	}
-	
+	// ===================== Original discovery helpers =====================
 	private ArrayList<BlockPos> getNearbyAnchors()
 	{
 		Vec3d eyesVec = RotationUtils.getEyesPos().subtract(0.5, 0.5, 0.5);
@@ -321,24 +662,25 @@ public final class AnchorAuraHack extends Hack implements UpdateListener
 	private ArrayList<Entity> getNearbyTargets()
 	{
 		double rangeSq = range.getValueSq();
-		
 		Comparator<Entity> furthestFromPlayer = Comparator
 			.<Entity> comparingDouble(e -> MC.player.squaredDistanceTo(e))
 			.reversed();
 		
-		Stream<Entity> stream =
-			StreamSupport.stream(MC.world.getEntities().spliterator(), false)
-				.filter(e -> !e.isRemoved())
-				.filter(e -> e instanceof LivingEntity
-					&& ((LivingEntity)e).getHealth() > 0)
-				.filter(e -> e != MC.player)
-				.filter(e -> !(e instanceof FakePlayerEntity))
-				.filter(
-					e -> !WURST.getFriends().contains(e.getName().getString()))
-				.filter(e -> MC.player.squaredDistanceTo(e) <= rangeSq);
+		final Set<String> list = parsePlayerListLower();
+		
+		Stream<Entity> stream = StreamSupport
+			.stream(MC.world.getEntities().spliterator(), false)
+			.filter(e -> !e.isRemoved())
+			.filter(e -> e instanceof LivingEntity
+				&& ((LivingEntity)e).getHealth() > 0)
+			.filter(e -> e != MC.player)
+			.filter(e -> !(e instanceof FakePlayerEntity))
+			.filter(e -> !WURST.getFriends().contains(e.getName().getString()))
+			.filter(e -> MC.player.squaredDistanceTo(e) <= rangeSq)
+			// NEW: player allow/deny logic
+			.filter(e -> isPlayerAllowed(e, list));
 		
 		stream = entityFilters.applyTo(stream);
-		
 		return stream.sorted(furthestFromPlayer)
 			.collect(Collectors.toCollection(ArrayList::new));
 	}
@@ -347,7 +689,6 @@ public final class AnchorAuraHack extends Hack implements UpdateListener
 	{
 		Vec3d eyesVec = RotationUtils.getEyesPos().subtract(0.5, 0.5, 0.5);
 		double rangeSq = MathHelper.square(range.getValue() + 0.5);
-		
 		BlockPos center = target.getBlockPos();
 		int rangeI = 2;
 		
@@ -401,7 +742,6 @@ public final class AnchorAuraHack extends Hack implements UpdateListener
 	private enum TakeItemsFrom
 	{
 		HOTBAR("Hotbar", 9),
-		
 		INVENTORY("Inventory", 36);
 		
 		private final String name;
@@ -418,5 +758,13 @@ public final class AnchorAuraHack extends Hack implements UpdateListener
 		{
 			return name;
 		}
+	}
+	
+	// tiny convenience
+	private static ArrayList<BlockPos> singleton(BlockPos p)
+	{
+		ArrayList<BlockPos> l = new ArrayList<>(1);
+		l.add(p);
+		return l;
 	}
 }
