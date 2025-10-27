@@ -16,6 +16,7 @@ import net.wurstclient.Category;
 import net.wurstclient.WurstClient;
 import net.wurstclient.events.GUIRenderListener;
 import net.wurstclient.hack.Hack;
+import net.wurstclient.settings.CheckboxSetting;
 import net.wurstclient.settings.SliderSetting;
 import net.wurstclient.settings.SliderSetting.ValueDisplay;
 
@@ -25,9 +26,20 @@ public final class StatusHudHack extends Hack implements GUIRenderListener
 	private static final WurstClient WURST = WurstClient.INSTANCE;
 	
 	private final SliderSetting x = new SliderSetting("X",
-		"Horizontal HUD position.", 6, 0, 500, 1, ValueDisplay.INTEGER);
+		"Horizontal HUD position.", 6, 0, 2000, 1, ValueDisplay.INTEGER);
 	private final SliderSetting y = new SliderSetting("Y",
-		"Vertical HUD position.", 6, 0, 500, 1, ValueDisplay.INTEGER);
+		"Vertical HUD position.", 6, 0, 2000, 1, ValueDisplay.INTEGER);
+	
+	// New: compact layout controls
+	private final SliderSetting tileSize = new SliderSetting("Tile size",
+		"Square tile side length (px).", 22, 16, 32, 1, ValueDisplay.INTEGER);
+	private final SliderSetting gap = new SliderSetting("Gap",
+		"Space between tiles (px).", 4, 0, 16, 1, ValueDisplay.INTEGER);
+	private final SliderSetting columns = new SliderSetting("Columns",
+		"How many tiles per row.", 7, 1, 12, 1, ValueDisplay.INTEGER);
+	private final CheckboxSetting showLabels =
+		new CheckboxSetting("Show labels (tiny)",
+			"Optional 2-letter labels; still compact.", false);
 	
 	public StatusHudHack()
 	{
@@ -35,6 +47,10 @@ public final class StatusHudHack extends Hack implements GUIRenderListener
 		setCategory(Category.RENDER);
 		addSetting(x);
 		addSetting(y);
+		addSetting(tileSize);
+		addSetting(gap);
+		addSetting(columns);
+		addSetting(showLabels);
 	}
 	
 	@Override
@@ -50,19 +66,22 @@ public final class StatusHudHack extends Hack implements GUIRenderListener
 	}
 	
 	@Override
-	public void onRenderGUI(DrawContext context, float partialTicks)
+	public void onRenderGUI(DrawContext ctx, float partialTicks)
 	{
 		if(MC.player == null || MC.options == null || MC.options.hudHidden)
 			return;
 		
 		int baseX = x.getValueI();
 		int baseY = y.getValueI();
-		int offX = 0;
+		int size = tileSize.getValueI(); // square
+		int pad = Math.max(1, Math.min(3, size / 10)); // inner padding
+		int g = gap.getValueI();
+		int cols = Math.max(1, columns.getValueI());
 		
-		boolean maceOn = false;
-		boolean preferElytra = false;
-		boolean preferFireworks = false;
-		boolean eatOn = false;
+		// Gather statuses (defensive)
+		boolean maceOn = false, preferElytra = false, preferFireworks = false,
+			eatOn = false;
+		boolean anchorOn = false, crystalOn = false, totemOn = false;
 		
 		try
 		{
@@ -71,7 +90,7 @@ public final class StatusHudHack extends Hack implements GUIRenderListener
 			{
 				maceOn = am.isEnabled();
 				preferElytra = am.isPreferElytraAir();
-				preferFireworks = am.isPreferFireworks(); // NEW
+				preferFireworks = am.isPreferFireworks();
 			}
 		}catch(Throwable ignored)
 		{}
@@ -84,48 +103,98 @@ public final class StatusHudHack extends Hack implements GUIRenderListener
 		}catch(Throwable ignored)
 		{}
 		
-		// AutoMace tile
-		drawIconTile(context, baseX + offX, baseY, maceOn);
-		context.drawItem(new ItemStack(Items.MACE), baseX + offX + 2,
-			baseY + 2);
-		context.drawTextWithShadow(MC.textRenderer,
-			maceOn ? "Mace:ON" : "Mace:OFF", baseX + offX + 22, baseY + 6,
-			0xFFFFFF);
-		offX += 90;
+		try
+		{
+			var aa = WURST.getHax().anchorAuraHack; // Anchor Aura
+			if(aa != null)
+				anchorOn = aa.isEnabled();
+		}catch(Throwable ignored)
+		{}
 		
-		// Prefer Elytra/Chest tile
-		drawIconTile(context, baseX + offX, baseY, preferElytra);
-		context.drawItem(new ItemStack(Items.ELYTRA), baseX + offX + 2,
-			baseY + 2);
-		context.drawTextWithShadow(MC.textRenderer,
-			preferElytra ? "Elytra" : "Chest", baseX + offX + 22, baseY + 6,
-			0xFFFFFF);
-		offX += 90;
+		try
+		{
+			var ca = WURST.getHax().crystalAuraHack; // Crystal Aura
+			if(ca != null)
+				crystalOn = ca.isEnabled();
+		}catch(Throwable ignored)
+		{}
 		
-		// Prefer Fireworks tile (NEW)
-		drawIconTile(context, baseX + offX, baseY, preferFireworks);
-		context.drawItem(new ItemStack(Items.FIREWORK_ROCKET), baseX + offX + 2,
-			baseY + 2);
-		context.drawTextWithShadow(MC.textRenderer,
-			preferFireworks ? "Rockets" : "NoRkt", baseX + offX + 22, baseY + 6,
-			0xFFFFFF);
-		offX += 90;
+		try
+		{
+			var at = WURST.getHax().autoTotemHack; // AutoTotem
+			if(at != null)
+				totemOn = at.isEnabled();
+		}catch(Throwable ignored)
+		{}
 		
-		// AutoEat tile
-		drawIconTile(context, baseX + offX, baseY, eatOn);
-		context.drawItem(new ItemStack(Items.COOKED_BEEF), baseX + offX + 2,
-			baseY + 2);
-		context.drawTextWithShadow(MC.textRenderer,
-			eatOn ? "Eat:ON" : "Eat:OFF", baseX + offX + 22, baseY + 6,
-			0xFFFFFF);
+		// Build the tiles (icon + status)
+		Tile[] tiles = new Tile[]{
+			new Tile(new ItemStack(Items.MACE), maceOn, "MC"),
+			new Tile(new ItemStack(Items.ELYTRA), preferElytra, "EL"),
+			new Tile(new ItemStack(Items.FIREWORK_ROCKET), preferFireworks,
+				"FW"),
+			new Tile(new ItemStack(Items.COOKED_BEEF), eatOn, "ET"),
+			new Tile(new ItemStack(Items.RESPAWN_ANCHOR), anchorOn, "AN"),
+			new Tile(new ItemStack(Items.END_CRYSTAL), crystalOn, "CR"),
+			new Tile(new ItemStack(Items.TOTEM_OF_UNDYING), totemOn, "TT")};
+		
+		// Render grid
+		int xIdx = 0;
+		int yIdx = 0;
+		for(int i = 0; i < tiles.length; i++)
+		{
+			int drawX = baseX + xIdx * (size + g);
+			int drawY = baseY + yIdx * (size + g);
+			drawTile(ctx, drawX, drawY, size, pad, tiles[i]);
+			xIdx++;
+			if(xIdx >= cols)
+			{
+				xIdx = 0;
+				yIdx++;
+			}
+		}
 	}
 	
-	private void drawIconTile(DrawContext ctx, int x, int y,
-		boolean highlighted)
+	private static final class Tile
 	{
-		int bg = highlighted ? 0xA0008020 : 0xA0000000;
-		int border = 0x40000000;
-		ctx.fill(x, y, x + 84, y + 20, border);
-		ctx.fill(x + 1, y + 1, x + 83, y + 19, bg);
+		final ItemStack icon;
+		final boolean on;
+		final String label2; // tiny 2-letter label
+		
+		Tile(ItemStack icon, boolean on, String label2)
+		{
+			this.icon = icon;
+			this.on = on;
+			this.label2 = label2;
+		}
+	}
+	
+	private void drawTile(DrawContext ctx, int x, int y, int size, int pad,
+		Tile t)
+	{
+		// Colors: subtle inner fill + status border
+		int border = t.on ? 0xA000A040 /* green-ish */ : 0xA0404040 /* gray */;
+		int fill = t.on ? 0x6000A040 : 0x50000000;
+		
+		// Outer border
+		ctx.fill(x, y, x + size, y + size, border);
+		// Inner area
+		ctx.fill(x + 1, y + 1, x + size - 1, y + size - 1, fill);
+		
+		// Draw 16x16 item centered in the square
+		int iconX = x + (size - 16) / 2;
+		int iconY = y + (size - 16) / 2;
+		ctx.drawItem(t.icon, iconX, iconY);
+		
+		// Optional teeny label in corner
+		if(showLabels.isChecked() && MC.textRenderer != null)
+		{
+			int col = t.on ? 0xFFFFFF : 0xB0B0B0;
+			String s = t.label2;
+			int w = MC.textRenderer.getWidth(s);
+			// Bottom-right corner, 1px inset
+			ctx.drawTextWithShadow(MC.textRenderer, s, x + size - w - 2,
+				y + size - 9, col);
+		}
 	}
 }

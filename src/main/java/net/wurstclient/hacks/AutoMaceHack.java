@@ -37,7 +37,6 @@ import net.wurstclient.settings.CheckboxSetting;
 import net.wurstclient.settings.SliderSetting;
 import net.wurstclient.settings.SliderSetting.ValueDisplay;
 import net.wurstclient.settings.TextFieldSetting;
-import net.wurstclient.util.ChatUtils;
 import net.wurstclient.util.InventoryUtils;
 import net.wurstclient.WurstClient;
 import net.wurstclient.mixinterface.IMinecraftClient;
@@ -78,6 +77,16 @@ public final class AutoMaceHack extends Hack
 		"If ON, only attacks players while dropping. If OFF, attacks any living entity.",
 		false);
 	
+	private final SliderSetting legitPreDelayMs = new SliderSetting(
+		"Legit pre-switch delay (ms)",
+		"Wait this long after selecting a hotbar slot before using the item.",
+		120, 0, 600, 10, ValueDisplay.INTEGER);
+	
+	private final SliderSetting legitPostDwellMs =
+		new SliderSetting("Legit post-use dwell (ms)",
+			"Keep the switched slot selected this long after using the item.",
+			150, 0, 1000, 10, ValueDisplay.INTEGER);
+	
 	private final SliderSetting hitRange =
 		new SliderSetting("Hit range", "Range for auto-hit while dropping.",
 			4.5, 1.0, 6.0, 0.1, ValueDisplay.DECIMAL);
@@ -98,10 +107,32 @@ public final class AutoMaceHack extends Hack
 		new SliderSetting("Action delay (ms)", "Delay between internal steps.",
 			120, 0, 1000, 10, ValueDisplay.INTEGER);
 	
+	// If ON, only use items from hotbar (1–9), visibly switch, right-click,
+	// etc.
+	private final CheckboxSetting legitMode = new CheckboxSetting("Legit mode",
+		"Uses only items that are in the hotbar and visibly switches hands.\n"
+			+ "Also restricts auto-hits to a 45° cone in front of you.",
+		false);
+	
 	// Runtime
 	private int lastHeldSlot = -1;
 	private long lastBurstNs = 0L; // throttle only the wind-burst
 	private long lastHitNs = 0L;
+	
+	private enum LegitAction
+	{
+		NONE,
+		WIND,
+		EQUIP_ELYTRA,
+		EQUIP_ARMOR
+	}
+	
+	private LegitAction pendingLegitAction = LegitAction.NONE;
+	private int pendingRestoreSlot = -1;
+	private long legitUseAtNs = 0L;
+	private long legitRestoreAtNs = 0L;
+	private int pendingSelectedSlot = -1; // the slot we switched to for the
+											// action
 	
 	public AutoMaceHack()
 	{
@@ -115,7 +146,10 @@ public final class AutoMaceHack extends Hack
 		
 		addSetting(autoEquipEnabled);
 		addSetting(preferElytraAir);
-		addSetting(preferFireworks); // NEW
+		addSetting(preferFireworks);
+		addSetting(legitMode);
+		addSetting(legitPreDelayMs);
+		addSetting(legitPostDwellMs);
 		
 		addSetting(hitPlayersOnly);
 		addSetting(hitRange);
@@ -130,7 +164,7 @@ public final class AutoMaceHack extends Hack
 		EVENTS.add(UpdateListener.class, this);
 		EVENTS.add(HandleInputListener.class, this);
 		EVENTS.add(RenderListener.class, this);
-		ChatUtils.message("AutoMace enabled");
+		// ChatUtils.message("AutoMace enabled");
 	}
 	
 	@Override
@@ -142,7 +176,7 @@ public final class AutoMaceHack extends Hack
 		if(MC.player != null && lastHeldSlot >= 0)
 			MC.player.getInventory().setSelectedSlot(lastHeldSlot);
 		lastHeldSlot = -1;
-		ChatUtils.message("AutoMace disabled");
+		// ChatUtils.message("AutoMace disabled");
 	}
 	
 	@Override
@@ -153,18 +187,18 @@ public final class AutoMaceHack extends Hack
 		
 		final boolean onGround = MC.player.isOnGround();
 		final long now = System.nanoTime();
+		if(legitMode.isChecked())
+			driveLegitSequence(now);
 		
 		// === Settings coupling (Elytra has priority over Fireworks) ===
-		// If Elytra is OFF while Fireworks is ON, turn Fireworks OFF (allow
-		// user to disable Elytra).
 		if(!preferElytraAir.isChecked() && preferFireworks.isChecked())
 			preferFireworks.setChecked(false);
-		// NOTE: We no longer auto-enable Elytra when Fireworks is enabled.
-		// Users can enable Fireworks first, but it will be auto-turned off
-		// unless Elytra is also turned on.
-		
+			
 		// === Auto-equip chest item ===
-		if(autoEquipEnabled.isChecked())
+		// 1) Auto-equip: don't start new equips while a legit sequence is
+		// active
+		if(autoEquipEnabled.isChecked()
+			&& (!legitMode.isChecked() || !legitSequenceActive()))
 		{
 			if(!onGround)
 			{
@@ -183,11 +217,7 @@ public final class AutoMaceHack extends Hack
 				}
 			}else
 			{
-				if(preferElytraAir.isChecked())
-				{
-					// Keep whatever the player chose on ground (including
-					// Elytra)
-				}else
+				if(!preferElytraAir.isChecked())
 				{
 					if(MC.player.getEquippedStack(EquipmentSlot.CHEST)
 						.getItem() == Items.ELYTRA
@@ -198,8 +228,9 @@ public final class AutoMaceHack extends Hack
 			}
 		}
 		
-		// Decide what to HOLD in hand
-		chooseHandItem(onGround);
+		// 2) Hand choice: don't fight the sequencer while it's switching
+		if(!legitMode.isChecked() || !legitSequenceActive())
+			chooseHandItem(onGround);
 		
 		// Build ignore set (for targeting only)
 		final Set<String> ignoreSet =
@@ -215,29 +246,41 @@ public final class AutoMaceHack extends Hack
 			
 		// === Repeating wind burst while standing on ground (cooldown =
 		// actionDelayMs) ===
-		if(onGround)
+		if(onGround && (!legitMode.isChecked() || !legitSequenceActive()))
 		{
 			long burstCooldownNs =
 				TimeUnit.MILLISECONDS.toNanos(actionDelayMs.getValueI());
 			if(now - lastBurstNs >= burstCooldownNs)
 			{
+				// Schedule or do the burst. Cooldown will be set AFTER the
+				// actual use in legit mode.
 				if(tryWindBurstAtFeet())
 				{
-					lastBurstNs = now;
-					
-					// After burst: only switch back to Mace if fireworks are
-					// NOT preferred
-					if(!preferFireworks.isChecked())
+					if(!legitMode.isChecked())
 					{
-						Predicate<ItemStack> isMace = s -> s != null
-							&& !s.isEmpty()
-							&& (s.getItem() instanceof MaceItem || s.getName()
-								.getString().toLowerCase().contains("mace"));
-						InventoryUtils.selectItem(isMace, 36, true);
+						// Non-legit: we used it immediately, so start cooldown
+						// now
+						lastBurstNs = now;
+						
+						// In non-legit, it’s safe to switch back instantly
+						if(!preferFireworks.isChecked())
+						{
+							Predicate<ItemStack> isMace =
+								s -> s != null && !s.isEmpty()
+									&& (s.getItem() instanceof MaceItem
+										|| s.getName().getString().toLowerCase()
+											.contains("mace"));
+							InventoryUtils.selectItem(isMace, 36, true);
+						}
 					}
+					// In LEGIT mode, do NOT switch back here.
+					// The legit sequencer (driveLegitSequence) will restore the
+					// slot
+					// after the configured dwell, and only if !preferFireworks.
 				}
 			}
 		}
+		
 	}
 	
 	/**
@@ -246,6 +289,23 @@ public final class AutoMaceHack extends Hack
 	 */
 	private void ensureArmorEquippedByUse()
 	{
+		Predicate<ItemStack> isChest = s -> s != null && !s.isEmpty()
+			&& (s.isOf(Items.NETHERITE_CHESTPLATE)
+				|| s.isOf(Items.DIAMOND_CHESTPLATE)
+				|| s.isOf(Items.IRON_CHESTPLATE));
+		
+		if(legitMode.isChecked())
+		{
+			if(legitSequenceActive())
+				return;
+			int slot = findHotbarSlot(isChest);
+			if(slot == -1)
+				return;
+			startLegitSequence(slot, LegitAction.EQUIP_ARMOR, false);
+			return;
+		}
+		
+		// non-legit (old behavior)
 		int slot = InventoryUtils.indexOf(Items.NETHERITE_CHESTPLATE);
 		if(slot == -1)
 			slot = InventoryUtils.indexOf(Items.DIAMOND_CHESTPLATE);
@@ -254,16 +314,10 @@ public final class AutoMaceHack extends Hack
 		if(slot == -1)
 			return;
 		
-		// Select into hand (so right-click will equip it into the chest slot)
-		boolean ok = InventoryUtils.selectItem(s -> s != null && !s.isEmpty()
-			&& (s.isOf(Items.NETHERITE_CHESTPLATE)
-				|| s.isOf(Items.DIAMOND_CHESTPLATE)
-				|| s.isOf(Items.IRON_CHESTPLATE)),
-			36, true);
+		boolean ok = InventoryUtils.selectItem(isChest, 36, true);
 		if(!ok)
 			return;
 		
-		// Right-click to equip (whatever was worn goes back to inventory)
 		try
 		{
 			IMC.getInteractionManager().rightClickItem();
@@ -277,8 +331,131 @@ public final class AutoMaceHack extends Hack
 		}
 	}
 	
+	private void startLegitSequence(int selectSlot, LegitAction action,
+		boolean restoreToMaceIfPossible)
+	{
+		if(MC.player == null)
+			return;
+		if(legitSequenceActive())
+			return; // don't stack sequences
+			
+		// Select the requested hotbar slot and record timings
+		pendingSelectedSlot = selectSlot;
+		pendingRestoreSlot = MC.player.getInventory().getSelectedSlot();
+		selectHotbar(selectSlot);
+		
+		// clamp to minimums so the switch is actually visible
+		int preMs = Math.max(legitPreDelayMs.getValueI(), 80);
+		int postMs = Math.max(legitPostDwellMs.getValueI(), 120);
+		
+		long now = System.nanoTime();
+		legitUseAtNs = now + TimeUnit.MILLISECONDS.toNanos(preMs);
+		legitRestoreAtNs = 0L; // set after the actual use
+		pendingLegitAction = action;
+		
+		// -2 = prefer restoring to mace after WIND (then fall back to original)
+		if(action == LegitAction.WIND && restoreToMaceIfPossible)
+			pendingRestoreSlot = -2;
+			
+		// stash the dwell we want to use later
+		// (reuse legitPostDwellMs slider but apply clamp when we set it)
+		// we’ll read from the slider again during drive, so no extra field
+		// needed
+	}
+	
+	private void driveLegitSequence(long now)
+	{
+		if(!legitSequenceActive() || MC.player == null)
+			return;
+		
+		// Use phase
+		if(legitRestoreAtNs == 0L && now >= legitUseAtNs)
+		{
+			boolean used = false;
+			try
+			{
+				switch(pendingLegitAction)
+				{
+					case WIND:
+					{
+						BlockPos below = MC.player.getBlockPos().down();
+						Vec3d hitVec = Vec3d.ofCenter(below);
+						IMC.getInteractionManager().rightClickBlock(below,
+							Direction.UP, hitVec);
+						used = true;
+						// Start cooldown only after a real use happened
+						lastBurstNs = now;
+						break;
+					}
+					case EQUIP_ELYTRA:
+					case EQUIP_ARMOR:
+					{
+						try
+						{
+							IMC.getInteractionManager().rightClickItem();
+						}catch(Throwable t)
+						{
+							MC.interactionManager.interactItem(MC.player,
+								Hand.MAIN_HAND);
+						}
+						used = true;
+						break;
+					}
+					default:
+					break;
+				}
+			}catch(Throwable ignored)
+			{}
+			
+			// Even if use failed, move to restore soon so we don't get stuck
+			int postMs = Math.max(legitPostDwellMs.getValueI(), 120);
+			long dwell = TimeUnit.MILLISECONDS.toNanos(postMs);
+			legitRestoreAtNs =
+				now + (used ? dwell : TimeUnit.MILLISECONDS.toNanos(80));
+		}
+		
+		// Restore phase
+		if(legitRestoreAtNs != 0L && now >= legitRestoreAtNs)
+		{
+			boolean restored = false;
+			
+			if(pendingLegitAction == LegitAction.WIND
+				&& !preferFireworks.isChecked())
+			{
+				if(pendingRestoreSlot == -2)
+				{
+					restored = selectMaceHotbar();
+					if(!restored && pendingSelectedSlot >= 0)
+						restored = selectHotbar(pendingSelectedSlot);
+				}
+			}
+			
+			if(!restored && pendingRestoreSlot >= 0)
+				selectHotbar(pendingRestoreSlot);
+			
+			// clear sequence
+			pendingLegitAction = LegitAction.NONE;
+			pendingRestoreSlot = -1;
+			legitUseAtNs = 0L;
+			legitRestoreAtNs = 0L;
+			pendingSelectedSlot = -1;
+		}
+	}
+	
 	private void equipElytraByUse()
 	{
+		if(legitMode.isChecked())
+		{
+			if(legitSequenceActive())
+				return;
+			int slot = findHotbarSlot(s -> s.isOf(Items.ELYTRA));
+			if(slot == -1)
+				return;
+			startLegitSequence(slot, LegitAction.EQUIP_ELYTRA, false);
+			return;
+		}
+		
+		// non-legit (old behavior)
 		if(InventoryUtils.selectItem(
 			s -> s != null && !s.isEmpty() && s.isOf(Items.ELYTRA), 36, true))
 		{
@@ -297,6 +474,43 @@ public final class AutoMaceHack extends Hack
 		}
 	}
 	
+	private int findHotbarSlot(Predicate<ItemStack> pred)
+	{
+		if(MC.player == null)
+			return -1;
+		for(int i = 0; i < 9; i++)
+		{
+			ItemStack s = MC.player.getInventory().getStack(i);
+			if(s != null && !s.isEmpty() && pred.test(s))
+				return i;
+		}
+		return -1;
+	}
+	
+	private boolean selectHotbar(int slot)
+	{
+		if(slot < 0 || slot > 8 || MC.player == null)
+			return false;
+		MC.player.getInventory().setSelectedSlot(slot);
+		return true;
+	}
+	
+	private boolean legitSequenceActive()
+	{
+		return pendingLegitAction != LegitAction.NONE;
+	}
+	
+	private boolean selectHotbar(Predicate<ItemStack> pred)
+	{
+		return selectHotbar(findHotbarSlot(pred));
+	}
+	
+	private boolean selectMaceHotbar()
+	{
+		return selectHotbar(s -> s.getItem() instanceof MaceItem
+			|| s.getName().getString().toLowerCase().contains("mace"));
+	}
+	
 	@Override
 	public void onHandleInput()
 	{}
@@ -312,33 +526,64 @@ public final class AutoMaceHack extends Hack
 	
 	private void chooseHandItem(boolean onGround)
 	{
-		// NEW highest priority: Prefer Fireworks in hand (all scenarios)
+		if(legitMode.isChecked() && legitSequenceActive())
+			return; // don't override the slot while animating a legit action
+		// Highest priority: Fireworks preference (works in legit & non-legit)
 		if(preferFireworks.isChecked())
 		{
-			InventoryUtils.selectItem(
-				s -> s != null && !s.isEmpty() && s.isOf(Items.FIREWORK_ROCKET),
-				36, false);
+			if(legitMode.isChecked())
+			{
+				// Only select if rockets are actually on hotbar
+				if(!selectHotbar(s -> s != null && !s.isEmpty()
+					&& s.isOf(Items.FIREWORK_ROCKET)))
+				{
+					// Optional: tell the user once if nothing found
+					// ChatUtils.message("AutoMace (legit): Put Fireworks in
+					// hotbar to hold them.");
+				}
+			}else
+			{
+				InventoryUtils.selectItem(s -> s != null && !s.isEmpty()
+					&& s.isOf(Items.FIREWORK_ROCKET), 36, false);
+			}
 			return;
 		}
 		
-		// If user prefers Elytra in air, we STILL HOLD MACE (as requested)
+		// If user prefers Elytra in air, still HOLD MACE (your requested
+		// behavior)
 		if(preferElytraAir.isChecked())
+		{
+			if(legitMode.isChecked())
+			{
+				// legit: only pick mace if it’s on hotbar
+				selectHotbar(s -> s != null && !s.isEmpty()
+					&& (s.getItem() instanceof MaceItem || s.getName()
+						.getString().toLowerCase().contains("mace")));
+			}else
+			{
+				InventoryUtils.selectItem(
+					s -> s != null && !s.isEmpty()
+						&& (s.getItem() instanceof MaceItem || s.getName()
+							.getString().toLowerCase().contains("mace")),
+					36, false);
+			}
+			return;
+		}
+		
+		// Default: hold Mace
+		if(legitMode.isChecked())
+		{
+			selectHotbar(s -> s != null && !s.isEmpty()
+				&& (s.getItem() instanceof MaceItem
+					|| s.getName().getString().toLowerCase().contains("mace")));
+		}else
 		{
 			InventoryUtils.selectItem(
 				s -> s != null && !s.isEmpty()
-					&& ((s.getItem() instanceof MaceItem) || s.getName()
+					&& (s.getItem() instanceof MaceItem || s.getName()
 						.getString().toLowerCase().contains("mace")),
 				36, false);
-			return;
 		}
-		
-		// Otherwise (default): hold Mace
-		InventoryUtils
-			.selectItem(
-				s -> s != null && !s.isEmpty()
-					&& ((s.getItem() instanceof MaceItem) || s.getName()
-						.getString().toLowerCase().contains("mace")),
-				36, false);
 	}
 	
 	/** Use wind burst by clicking the block directly below the player. */
@@ -352,7 +597,35 @@ public final class AutoMaceHack extends Hack
 			s -> s != null && !s.isEmpty() && (s.isOf(Items.WIND_CHARGE)
 				|| s.getName().getString().toLowerCase().contains(search));
 		
-		lastHeldSlot = MC.player.getInventory().getSelectedSlot();
+		int oldSel = MC.player.getInventory().getSelectedSlot();
+		
+		if(legitMode.isChecked())
+		{
+			if(legitSequenceActive())
+				return false; // wait your turn
+				
+			int windSlot = findHotbarSlot(isWind);
+			if(windSlot == -1)
+				return false; // legit mode requires it on hotbar
+				
+			if(suppressMovementDuringBurst.isChecked())
+			{
+				GameOptions gs = MC.options;
+				KeyBinding[] bindings = {gs.forwardKey, gs.backKey, gs.leftKey,
+					gs.rightKey, gs.jumpKey, gs.sneakKey};
+				for(KeyBinding b : bindings)
+					b.setPressed(false);
+			}
+			
+			// Schedule: visible switch now; actual use handled by sequencer
+			// after legitPreDelayMs
+			startLegitSequence(windSlot, LegitAction.WIND,
+				/* restoreToMaceIfPossible = */ !preferFireworks.isChecked());
+			return true; // scheduled; cooldown set after real use
+		}
+		
+		// non-legit (old behavior)
+		lastHeldSlot = oldSel;
 		boolean selected = InventoryUtils.selectItem(isWind, 36, true);
 		if(!selected)
 			return false;
@@ -376,6 +649,7 @@ public final class AutoMaceHack extends Hack
 		{
 			return false;
 		}
+		
 		return true;
 	}
 	
@@ -390,35 +664,54 @@ public final class AutoMaceHack extends Hack
 			.toNanos(hitDelayMs.getValueI()))
 			return;
 		
-		final double range = hitRange.getValue();
-		var box = MC.player.getBoundingBox().expand(range, range, range);
-		var candidates = MC.world.getOtherEntities(MC.player, box, e -> {
-			if(!e.isAlive())
-				return false;
-			if(e.squaredDistanceTo(MC.player) > range * range)
-				return false;
-			if(e instanceof PlayerEntity p)
-			{
-				String name = getPlayerNameLower(p);
-				if(name != null && ignoreSet.contains(name))
-					return false;
-				if(hitPlayersOnly.isChecked())
-					return true;
-			}else if(hitPlayersOnly.isChecked())
-			{
-				return false;
-			}
-			return e.isAttackable();
-		});
-		
-		var target = candidates.stream()
-			.min((a, b) -> Double.compare(a.squaredDistanceTo(MC.player),
-				b.squaredDistanceTo(MC.player)))
-			.orElse(null);
-		
-		if(target == null)
+		// Only attack what the crosshair is actually on
+		if(MC.crosshairTarget == null || MC.crosshairTarget
+			.getType() != net.minecraft.util.hit.HitResult.Type.ENTITY)
 			return;
 		
+		// Get the targeted entity without importing EntityHitResult
+		net.minecraft.entity.Entity target;
+		try
+		{
+			target =
+				((net.minecraft.util.hit.EntityHitResult)MC.crosshairTarget)
+					.getEntity();
+		}catch(Throwable t)
+		{
+			return;
+		}
+		if(target == null || !target.isAlive())
+			return;
+		
+		// Optional: players only
+		if(hitPlayersOnly.isChecked() && !(target instanceof PlayerEntity))
+			return;
+		
+		// Ignore list
+		if(target instanceof PlayerEntity p)
+		{
+			String name = getPlayerNameLower(p);
+			if(name != null && ignoreSet.contains(name))
+				return;
+		}
+		
+		// Range check using vectors (no squaredDistanceTo(player) overload
+		// needed)
+		final double range = hitRange.getValue();
+		Vec3d eyePos = MC.player.getCameraPosVec(1.0F);
+		Vec3d targetCenter = target.getBoundingBox().getCenter();
+		double dist2 = eyePos.squaredDistanceTo(targetCenter);
+		if(dist2 > range * range)
+			return;
+		
+		// 45° cone in front of the player (legit-looking)
+		final double minDot = Math.cos(Math.toRadians(45.0)); // ~0.7071
+		Vec3d look = MC.player.getRotationVec(1.0F).normalize();
+		Vec3d to = targetCenter.subtract(eyePos).normalize();
+		if(look.dotProduct(to) < minDot)
+			return;
+		
+		// Attack
 		try
 		{
 			MC.interactionManager.attackEntity(MC.player, target);
