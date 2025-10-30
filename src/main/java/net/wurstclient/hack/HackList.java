@@ -69,6 +69,7 @@ public final class HackList implements UpdateListener
 	public final AvoidStaffHack avoidStaffHack = new AvoidStaffHack();
 	public final BarrierEspHack barrierEspHack = new BarrierEspHack();
 	public final BaseFinderHack baseFinderHack = new BaseFinderHack();
+	public final BankManagerHack bankManagerHack = new BankManagerHack();
 	public final BlinkHack blinkHack = new BlinkHack();
 	public final BoatFlyHack boatFlyHack = new BoatFlyHack();
 	public final BonemealAuraHack bonemealAuraHack = new BonemealAuraHack();

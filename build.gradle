@@ -45,26 +45,33 @@ configurations.all {
 }
 
 dependencies {
-	// To change the versions see the gradle.properties file
-	minecraft "com.mojang:minecraft:${project.minecraft_version}"
-	mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
-	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
-	testImplementation "net.fabricmc:fabric-loader-junit:${project.loader_version}"
-	
-	// Fabric API. This is technically optional, but you probably want it anyway.
-	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
-	
-	// net.wurstclient.ai.PathPos extends net.minecraft.util.math.BlockPos,
-	// which uses javax.annotation.concurrent.Immutable, which is part of
-	// the JSR305 library.
-	//
-	// In other words, Wurst won't compile without this library,
-	// even though it's Minecraft that actually uses it.
-	modImplementation "com.google.code.findbugs:jsr305:3.0.2"
-  // HTTP + JSON
-	implementation 'com.squareup.okhttp3:okhttp:4.12.0'
-	implementation 'com.google.code.gson:gson:2.10.1'
+    // To change the versions see the gradle.properties file
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+    modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    testImplementation "net.fabricmc:fabric-loader-junit:${project.loader_version}"
+
+    // Fabric API. This is technically optional, but you probably want it anyway.
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+
+    // net.wurstclient.ai.PathPos extends net.minecraft.util.math.BlockPos,
+    // which uses javax.annotation.concurrent.Immutable, which is part of
+    // the JSR305 library.
+    modImplementation "com.google.code.findbugs:jsr305:3.0.2"
+
+    // --- HTTP + JSON (embed into the mod jar) ---
+    modImplementation include("com.squareup.okhttp3:okhttp:4.12.0")
+    modImplementation include("com.squareup.okio:okio:3.9.0")
+    modImplementation include("com.google.code.gson:gson:2.11.0")
+
+    // --- Kotlin runtime needed by OkHttp/Okio ---
+    modImplementation include("org.jetbrains.kotlin:kotlin-stdlib:1.9.24")
+    modImplementation include("org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.9.24")
+    // OkHttp depends on Okio; include explicitly to be safe:
+    modImplementation include("com.squareup.okio:okio:3.9.0")
+    modImplementation include("com.google.code.gson:gson:2.11.0")
 }
+
 
 loom {
 	accessWidenerPath = file("src/main/resources/wurst.accesswidener")
