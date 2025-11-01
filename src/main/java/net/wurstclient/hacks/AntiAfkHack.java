@@ -56,29 +56,6 @@ public final class AntiAfkHack extends Hack
 		new CheckboxSetting("Show wait time",
 			"description.wurst.setting.antiafk.show_wait_time", true);
 	
-	// ---- Stay-inside bounds (relative to where you enable AntiAFK) ----
-	private final CheckboxSetting enforceBounds = new CheckboxSetting(
-		"Stay inside X/Z bounds",
-		"When enabled, AntiAFK will only walk inside a configurable X/Z rectangle, relative to your starting position.",
-		true);
-	
-	// Offsets are relative to the 'start' position captured onEnable()
-	private final SliderSetting minXOffset = new SliderSetting("Min X offset",
-		"Minimum X offset from start (can be negative).", -8, -128, 0, 1,
-		SliderSetting.ValueDisplay.DECIMAL);
-	
-	private final SliderSetting maxXOffset = new SliderSetting("Max X offset",
-		"Maximum X offset from start (can be positive).", 8, 0, 128, 1,
-		SliderSetting.ValueDisplay.DECIMAL);
-	
-	private final SliderSetting minZOffset = new SliderSetting("Min Z offset",
-		"Minimum Z offset from start (can be negative).", -8, -128, 0, 1,
-		SliderSetting.ValueDisplay.DECIMAL);
-	
-	private final SliderSetting maxZOffset = new SliderSetting("Max Z offset",
-		"Maximum Z offset from start (can be positive).", 8, 0, 128, 1,
-		SliderSetting.ValueDisplay.DECIMAL);
-	
 	private int timer;
 	private Random random = Random.createLocal();
 	private BlockPos start;
@@ -99,12 +76,6 @@ public final class AntiAfkHack extends Hack
 		addSetting(waitTime);
 		addSetting(waitTimeRand);
 		addSetting(showWaitTime);
-		addSetting(enforceBounds);
-		addSetting(minXOffset);
-		addSetting(maxXOffset);
-		addSetting(minZOffset);
-		addSetting(maxZOffset);
-		
 	}
 	
 	@Override
@@ -125,7 +96,7 @@ public final class AntiAfkHack extends Hack
 			new RandomPathFinder(randomize(start, aiRange.getValueI(), true));
 		creativeFlying = MC.player.getAbilities().flying;
 		
-		// WURST.getHax().autoFishHack.setEnabled(false);
+		WURST.getHax().autoFishHack.setEnabled(false);
 		
 		EVENTS.add(UpdateListener.class, this);
 		EVENTS.add(RenderListener.class, this);
@@ -256,43 +227,10 @@ public final class AntiAfkHack extends Hack
 	
 	private BlockPos randomize(BlockPos pos, int range, boolean includeY)
 	{
-		// draw random offsets in the same way as before
-		int rx = random.nextInt(2 * range + 1) - range;
-		int ry = includeY ? random.nextInt(2 * range + 1) - range : 0;
-		int rz = random.nextInt(2 * range + 1) - range;
-		
-		int x = pos.getX() + rx;
-		int y = pos.getY() + ry;
-		int z = pos.getZ() + rz;
-		
-		if(enforceBounds.isChecked() && start != null)
-		{
-			// compute absolute bounds once from start + offsets
-			int minX = start.getX() + (int)minXOffset.getValue();
-			int maxX = start.getX() + (int)maxXOffset.getValue();
-			int minZ = start.getZ() + (int)minZOffset.getValue();
-			int maxZ = start.getZ() + (int)maxZOffset.getValue();
-			
-			// If the user inverted the sliders, fix them on the fly
-			if(minX > maxX)
-			{
-				int t = minX;
-				minX = maxX;
-				maxX = t;
-			}
-			if(minZ > maxZ)
-			{
-				int t = minZ;
-				minZ = maxZ;
-				maxZ = t;
-			}
-			
-			// clamp into the rectangle
-			x = Math.max(minX, Math.min(maxX, x));
-			z = Math.max(minZ, Math.min(maxZ, z));
-		}
-		
-		return new BlockPos(x, y, z);
+		int x = random.nextInt(2 * range + 1) - range;
+		int y = includeY ? random.nextInt(2 * range + 1) - range : 0;
+		int z = random.nextInt(2 * range + 1) - range;
+		return pos.add(x, y, z);
 	}
 	
 	private class RandomPathFinder extends PathFinder
