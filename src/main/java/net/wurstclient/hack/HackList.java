@@ -53,6 +53,8 @@ public final class HackList implements UpdateListener
 	public final AutoFishHack autoFishHack = new AutoFishHack();
 	public final AutoMineHack autoMineHack = new AutoMineHack();
 	public final AutoMaceHack autoMaceHack = new AutoMaceHack();
+	public final AutoMaceBlatantHack AutoMaceBlatantHack =
+		new AutoMaceBlatantHack();
 	public final AutoPotionHack autoPotionHack = new AutoPotionHack();
 	public final AutoReconnectHack autoReconnectHack = new AutoReconnectHack();
 	public final AutoRespawnHack autoRespawnHack = new AutoRespawnHack();
@@ -66,7 +68,6 @@ public final class HackList implements UpdateListener
 	public final AutoToolHack autoToolHack = new AutoToolHack();
 	public final AutoTotemHack autoTotemHack = new AutoTotemHack();
 	public final AutoWalkHack autoWalkHack = new AutoWalkHack();
-	public final AvoidStaffHack avoidStaffHack = new AvoidStaffHack();
 	public final BarrierEspHack barrierEspHack = new BarrierEspHack();
 	public final BaseFinderHack baseFinderHack = new BaseFinderHack();
 	public final BankManagerHack bankManagerHack = new BankManagerHack();
@@ -80,8 +81,6 @@ public final class HackList implements UpdateListener
 		new CameraDistanceHack();
 	public final CameraNoClipHack cameraNoClipHack = new CameraNoClipHack();
 	public final CaveFinderHack caveFinderHack = new CaveFinderHack();
-	public final ChatGptResponderHack chatGptResponderHack =
-		new ChatGptResponderHack();
 	public final ChatTranslatorHack chatTranslatorHack =
 		new ChatTranslatorHack();
 	public final ChestEspHack chestEspHack = new ChestEspHack();
@@ -151,7 +150,6 @@ public final class HackList implements UpdateListener
 	public final NoShieldOverlayHack noShieldOverlayHack =
 		new NoShieldOverlayHack();
 	public final NoSlowdownHack noSlowdownHack = new NoSlowdownHack();
-	public final NoSlowFallHack noSlowFallHack = new NoSlowFallHack();
 	public final NoVignetteHack noVignetteHack = new NoVignetteHack();
 	public final NoWeatherHack noWeatherHack = new NoWeatherHack();
 	public final NoWebHack noWebHack = new NoWebHack();
@@ -170,8 +168,6 @@ public final class HackList implements UpdateListener
 	public final RadarHack radarHack = new RadarHack();
 	public final RainbowUiHack rainbowUiHack = new RainbowUiHack();
 	public final ReachHack reachHack = new ReachHack();
-	public final RealisticAfkGrindHack realisticAfkGrindHack =
-		new RealisticAfkGrindHack();
 	public final RemoteViewHack remoteViewHack = new RemoteViewHack();
 	public final RestockHack restockHack = new RestockHack();
 	public final SafeWalkHack safeWalkHack = new SafeWalkHack();
@@ -190,7 +186,6 @@ public final class HackList implements UpdateListener
 	public final TillauraHack tillauraHack = new TillauraHack();
 	public final TimerHack timerHack = new TimerHack();
 	public final TiredHack tiredHack = new TiredHack();
-	public final TntAuraHack tntAuraHack = new TntAuraHack();
 	public final TooManyHaxHack tooManyHaxHack = new TooManyHaxHack();
 	public final TpAuraHack tpAuraHack = new TpAuraHack();
 	public final TrajectoriesHack trajectoriesHack = new TrajectoriesHack();
