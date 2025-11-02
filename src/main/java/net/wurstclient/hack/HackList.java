@@ -70,6 +70,7 @@ public final class HackList implements UpdateListener
 	public final AutoWalkHack autoWalkHack = new AutoWalkHack();
 	public final BarrierEspHack barrierEspHack = new BarrierEspHack();
 	public final BaseFinderHack baseFinderHack = new BaseFinderHack();
+	public final BankManagerHack bankManagerHack = new BankManagerHack();
 	public final BlinkHack blinkHack = new BlinkHack();
 	public final BoatFlyHack boatFlyHack = new BoatFlyHack();
 	public final BonemealAuraHack bonemealAuraHack = new BonemealAuraHack();
@@ -111,6 +112,8 @@ public final class HackList implements UpdateListener
 	public final HeadRollHack headRollHack = new HeadRollHack();
 	public final HealthTagsHack healthTagsHack = new HealthTagsHack();
 	public final HighJumpHack highJumpHack = new HighJumpHack();
+	public final HighlightPlayersHack HighlightPlayersHack =
+		new HighlightPlayersHack();
 	public final InfiniChatHack infiniChatHack = new InfiniChatHack();
 	public final InstaBuildHack instaBuildHack = new InstaBuildHack();
 	public final InstantBunkerHack instantBunkerHack = new InstantBunkerHack();

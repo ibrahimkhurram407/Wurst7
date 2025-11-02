@@ -1,0 +1,684 @@
+/*
+ * Copyright (c) 2014-2025 Wurst-Imperium and contributors.
+ *
+ * This source code is subject to the terms of the GNU General Public
+ * License, version 3. If a copy of the GPL was not distributed with this
+ * file, You can obtain one at: https://www.gnu.org/licenses/gpl-3.0.txt
+ */
+package net.wurstclient.hacks;
+
+import java.text.NumberFormat;
+import java.util.Locale;
+import java.util.concurrent.atomic.AtomicLong;
+
+import net.wurstclient.Category;
+import net.wurstclient.SearchTags;
+import net.wurstclient.events.ChatInputListener;
+import net.wurstclient.events.ChatInputListener.ChatInputEvent;
+import net.wurstclient.events.UpdateListener;
+import net.wurstclient.hack.Hack;
+import net.wurstclient.settings.CheckboxSetting;
+import net.wurstclient.settings.SliderSetting;
+import net.wurstclient.settings.TextFieldSetting;
+import net.wurstclient.bank.BankApiClient;
+
+@SearchTags({"bank", "economy", "withdraw", "deposit", "balance"})
+public final class BankManagerHack extends Hack
+	implements ChatInputListener, UpdateListener
+{
+	// ---- Required config ----
+	private final TextFieldSetting apiBase =
+		new TextFieldSetting("Bank API baseUrl", "http://localhost:8080");
+	private final TextFieldSetting apiKey = new TextFieldSetting(
+		"Bank API key (X-API-Key)", "d6892971-aada-4ab6-ac14-76cd4c77054b");
+	
+	// This client/bot IGN (used in /pay sender)
+	private final TextFieldSetting myIgn =
+		new TextFieldSetting("My IGN (bot account)", "ibrahimtest");
+	
+	// ---- Feature toggles ----
+	private final CheckboxSetting enableDeposits =
+		new CheckboxSetting("Accept deposits (auto-ledger)", true);
+	private final CheckboxSetting enableWithdrawals =
+		new CheckboxSetting("Allow withdrawals (DM commands)", true);
+	private final CheckboxSetting respondToDMs =
+		new CheckboxSetting("Respond to DMs", true);
+	private final CheckboxSetting checkOwnBalanceBeforePay =
+		new CheckboxSetting("Run /balance before paying", false);
+	private final SliderSetting defaultFeePct =
+		new SliderSetting("Default fee % (payout/withdraw all)", "", 7, 0, 25,
+			1, SliderSetting.ValueDisplay.DECIMAL);
+	
+	private final SliderSetting healthCheckEverySec =
+		new SliderSetting("Health check interval (seconds)", "", 60, 10, 600, 5,
+			SliderSetting.ValueDisplay.DECIMAL);
+	
+	private volatile boolean bankHealthy = false;
+	private final AtomicLong nextHealthAt = new AtomicLong(0);
+	
+	// ---- Ads ----
+	private final CheckboxSetting enableAds =
+		new CheckboxSetting("Send advertising message", true);
+	private final TextFieldSetting adMessage = new TextFieldSetting(
+		"Ad text (public chat)",
+		"§6[Bank]§r DM me “deposit”, “withdraw”, or “balance”. Earn interest, instant payouts!");
+	private final SliderSetting adEverySec =
+		new SliderSetting("Ad interval (seconds)", "", 180, 30, 1800, 10,
+			SliderSetting.ValueDisplay.DECIMAL);
+	
+	// ---- Safety limits ----
+	private final SliderSetting maxSingleWithdraw = new SliderSetting(
+		"Max withdraw per txn", "Hard cap per user request.", 5_000_000, 10_000,
+		1_000_000_000, 10_000, SliderSetting.ValueDisplay.DECIMAL);
+	
+	private final CheckboxSetting debug =
+		new CheckboxSetting("Debug log", false);
+	
+	// state
+	private final AtomicLong nextAdAt = new AtomicLong(0);
+	private BankApiClient bank;
+	private volatile Long ownCash = null; // in dollars
+	private volatile long ownCashAtMs = 0L; // timestamp parsed
+	private final Object balanceLock = new Object(); // notify/wait for parse
+	
+	// how long a parsed balance is considered fresh
+	private static final long BALANCE_MAX_AGE_MS = 10_000L; // 10s
+	
+	public BankManagerHack()
+	{
+		super("BankManager");
+		setCategory(Category.CHAT);
+		
+		addSetting(apiBase);
+		addSetting(apiKey);
+		addSetting(myIgn);
+		
+		addSetting(enableDeposits);
+		addSetting(enableWithdrawals);
+		addSetting(respondToDMs);
+		addSetting(checkOwnBalanceBeforePay);
+		addSetting(defaultFeePct);
+		addSetting(healthCheckEverySec);
+		
+		addSetting(enableAds);
+		addSetting(adMessage);
+		addSetting(adEverySec);
+		
+		addSetting(maxSingleWithdraw);
+		addSetting(debug);
+	}
+	
+	@Override
+	protected void onEnable()
+	{
+		nextAdAt.set(
+			System.currentTimeMillis() + (long)adEverySec.getValue() * 1000L);
+		nextHealthAt.set(0);
+		EVENTS.add(ChatInputListener.class, this);
+		EVENTS.add(UpdateListener.class, this);
+		bank = new BankApiClient(apiBase.getValue().trim(),
+			apiKey.getValue().trim());
+		nextAdAt.set(
+			System.currentTimeMillis() + (long)adEverySec.getValue() * 1000L);
+		if(debug.isChecked())
+			System.out.println("[BankManager] enabled");
+	}
+	
+	@Override
+	protected void onDisable()
+	{
+		EVENTS.remove(ChatInputListener.class, this);
+		EVENTS.remove(UpdateListener.class, this);
+		if(debug.isChecked())
+			System.out.println("[BankManager] disabled");
+	}
+	
+	// ----------------- Update: ads -----------------
+	@Override
+	public void onUpdate()
+	{
+		if(MC.getNetworkHandler() == null)
+			return;
+		
+		long now = System.currentTimeMillis();
+		
+		// refresh health flag on schedule (non-blocking)
+		if(now >= nextHealthAt.get())
+		{
+			nextHealthAt
+				.set(now + (long)healthCheckEverySec.getValue() * 1000L);
+			Thread.ofVirtual().start(() -> {
+				try
+				{
+					bankHealthy = bank.healthOk();
+				}catch(Exception ignored)
+				{
+					bankHealthy = false;
+				}
+				if(debug.isChecked())
+					System.out.println("[BankManager] health=" + bankHealthy);
+			});
+		}
+		
+		if(!enableAds.isChecked())
+			return;
+		if(now < nextAdAt.get())
+			return;
+		
+		String msg = adMessage.getValue();
+		if(msg == null)
+			msg = "";
+		
+		// strip any section sign formatting to avoid "illegal characters"
+		msg = msg.replaceAll("§.", "");
+		
+		if(bankHealthy)
+		{
+			if(!msg.isBlank())
+				MC.getNetworkHandler().sendChatMessage(msg);
+		}else
+		{
+			MC.getNetworkHandler()
+				.sendChatMessage("[Bank] temporarily offline. Try again soon.");
+		}
+		
+		nextAdAt.set(now + (long)adEverySec.getValue() * 1000L);
+	}
+	
+	// ----------------- Chat intake -----------------
+	@Override
+	public void onReceivedMessage(ChatInputEvent event)
+	{
+		final String raw = event.getComponent().getString();
+		final String clean = stripColors(raw).replaceAll("\\p{Cf}", "") // strip
+																		// zero-width/format
+																		// chars
+			.trim();
+		
+		if(debug.isChecked())
+			System.out.println(
+				"[BankManager] chat(raw): " + raw + " | clean: " + clean);
+		
+		// --- wallet balance parse (on any line) ---
+		Long parsedBal = parseWalletBalance(clean);
+		if(parsedBal != null)
+		{
+			ownCash = parsedBal;
+			ownCashAtMs = System.currentTimeMillis();
+			synchronized(balanceLock)
+			{
+				balanceLock.notifyAll();
+			}
+			if(debug.isChecked())
+				System.out.println("[BankManager] wallet=" + ownCash);
+		}
+		
+		// --- deposit detection (trusted server line) ---
+		if(enableDeposits.isChecked() && isServerEconomyDeposit(clean))
+		{
+			var dep = parseServerDeposit(clean);
+			if(dep != null)
+			{
+				Thread.ofVirtual()
+					.start(() -> handleDeposit(dep.sender, dep.amount, raw));
+			}
+			return;
+		}
+		final String line = event.getComponent().getString();
+		
+		// 2) DMs from players (withdraw/balance/help). Don’t trust public chat.
+		if(!respondToDMs.isChecked())
+			return;
+		var dm = parseInboundDM(clean, MC.getSession().getUsername());
+		if(dm == null)
+			return; // ignore non-DMs / own echoes
+			
+		String cmd = dm.msg.trim().toLowerCase(Locale.ROOT);
+		if(cmd.startsWith("withdraw"))
+		{
+			if(!enableWithdrawals.isChecked())
+			{
+				replyDM(dm.sender,
+					"Withdrawals are currently paused. Try later.");
+				return;
+			}
+			String arg = cmd.replaceFirst("withdraw", "").trim();
+			Thread.ofVirtual().stalrt(() -> handleWithdraw(dm.sender, arg));
+			return;
+		}
+		if(cmd.equals("balance") || cmd.equals("bal"))
+		{
+			Thread.ofVirtual().start(() -> handleBalance(dm.sender));
+			return;
+		}
+		if(cmd.equals("help") || cmd.equals("?"))
+		{
+			replyDM(dm.sender,
+				"Commands: balance | withdraw <amount|all>. To deposit, /pay "
+					+ myIgn.getValue() + " <amount>.");
+			return;
+		}
+	}
+	
+	// ----------------- Handlers -----------------
+	
+	private void handleDeposit(String fromPlayer, long amount, String rawLine)
+	{
+		try
+		{
+			bank.ensureAccount(fromPlayer);
+			var res = bank.depositR(fromPlayer, amount, "essx:" + rawLine);
+			if(res == null || !res.has("ok") || !res.get("ok").getAsBoolean())
+			{
+				if(debug.isChecked())
+					System.out
+						.println("[BankManager] deposit failed JSON: " + res);
+				return;
+			}
+			
+			long txnId =
+				res.has("txn_id") ? res.get("txn_id").getAsLong() : -1L;
+			var rc = res.getAsJsonObject("receipt");
+			double before = rc.get("before_balance").getAsDouble();
+			double after = rc.get("balance_after").getAsDouble();
+			double delta = rc.get("delta").getAsDouble();
+			
+			replyDM(fromPlayer,
+				"Deposit ok #" + txnId + ": +" + money(Math.round(delta))
+					+ " (bal " + money(Math.round(before)) + " → "
+					+ money(Math.round(after)) + ").");
+			
+		}catch(Exception e)
+		{
+			if(debug.isChecked())
+				e.printStackTrace();
+		}
+	}
+	
+	private void handleBalance(String sender)
+	{
+		try
+		{
+			var detail = bank.getPlayerDetail(sender);
+			if(detail == null)
+			{
+				replyDM(sender, "Could not fetch your balance. Try again.");
+				return;
+			}
+			
+			Long bal = null;
+			
+			// Preferred: { account: { balance: number } }
+			if(detail.has("account") && detail.get("account").isJsonObject())
+			{
+				var acc = detail.getAsJsonObject("account");
+				if(acc.has("balance"))
+					bal = Math.round(acc.get("balance").getAsDouble());
+			}
+			
+			// Fallbacks (older responses)
+			if(bal == null && detail.has("balance"))
+				bal = detail.get("balance").getAsLong();
+			if(bal == null && detail.has("data")
+				&& detail.getAsJsonObject("data").has("balance"))
+				bal = detail.getAsJsonObject("data").get("balance").getAsLong();
+			
+			if(bal == null)
+			{
+				replyDM(sender, "Could not fetch your balance. Try again.");
+				return;
+			}
+			
+			replyDM(sender, "Your bank balance is " + money(bal) + ".");
+		}catch(Exception e)
+		{
+			replyDM(sender, "Error fetching balance.");
+			if(debug.isChecked())
+				e.printStackTrace();
+		}
+	}
+	
+	private void handleWithdraw(String sender, String amountArg)
+	{
+		try
+		{
+			long feePct = (long)defaultFeePct.getValue();
+			Long amt = parseAmount(amountArg);
+			if(amt == null || amt <= 0)
+			{
+				replyDM(sender,
+					"Usage: withdraw <amount|all>. Example: withdraw 250k");
+				return;
+			}
+			if(amt > (long)maxSingleWithdraw.getValue())
+			{
+				replyDM(sender, "Max per withdrawal is "
+					+ money((long)maxSingleWithdraw.getValue()) + ".");
+				return;
+			}
+			
+			// If enabled, verify we can actually /pay the player
+			if(checkOwnBalanceBeforePay.isChecked())
+			{
+				Long wallet = ensureFreshOwnBalance(2000); // wait up to 2s
+				if(wallet == null)
+				{
+					replyDM(sender,
+						"Could not verify funds. Please try again in a moment.");
+					return;
+				}
+				if(wallet < amt)
+				{
+					replyDM(sender, "Insufficient funds in my wallet: have "
+						+ money(wallet) + ", need " + money(amt) + ".");
+					return;
+				}
+			}
+			
+			// now safe to hit bank API
+			var res = bank.payoutR(sender, amt, feePct, "user request");
+			if(res == null || !res.has("ok") || !res.get("ok").getAsBoolean())
+			{
+				replyDM(sender,
+					"Withdrawal failed. Maybe insufficient bank balance.");
+				return;
+			}
+			
+			if(amountArg.equalsIgnoreCase("all"))
+			{
+				if(res == null || !res.has("ok")
+					|| !res.get("ok").getAsBoolean())
+				{
+					replyDM(sender, "Withdraw-all failed.");
+					return;
+				}
+				long txnId =
+					res.has("txn_id") ? res.get("txn_id").getAsLong() : -1L;
+				var rc = res.getAsJsonObject("receipt");
+				long paid = Math.round(rc.get("paid_to_player").getAsDouble());
+				long fee = Math.round(rc.get("fee_charged").getAsDouble());
+				long before =
+					Math.round(rc.get("before_balance").getAsDouble());
+				long after = Math.round(rc.get("balance_after").getAsDouble());
+				
+				pay(sender, paid);
+				replyDM(sender,
+					"Withdraw-all #" + txnId + ": paid " + money(paid)
+						+ ", fee " + money(fee) + ". (bal " + money(before)
+						+ " → " + money(after) + ").");
+				return;
+			}
+			
+			if(amt == null || amt <= 0)
+			{
+				replyDM(sender,
+					"Usage: withdraw <amount|all>. Example: withdraw 250k");
+				return;
+			}
+			if(amt > (long)maxSingleWithdraw.getValue())
+			{
+				replyDM(sender, "Max per withdrawal is "
+					+ money((long)maxSingleWithdraw.getValue()) + ".");
+				return;
+			}
+			
+			if(checkOwnBalanceBeforePay.isChecked())
+			{
+				requestOwnBalance();
+				Thread.sleep(750);
+			}
+			
+			if(res == null || !res.has("ok") || !res.get("ok").getAsBoolean())
+			{
+				replyDM(sender,
+					"Withdrawal failed. Maybe insufficient bank balance.");
+				return;
+			}
+			
+			long txnId =
+				res.has("txn_id") ? res.get("txn_id").getAsLong() : -1L;
+			var rc = res.getAsJsonObject("receipt");
+			long paid = Math.round(rc.get("paid_to_player").getAsDouble());
+			long fee = Math.round(rc.get("fee_charged").getAsDouble());
+			long before = Math.round(rc.get("before_balance").getAsDouble());
+			long after = Math.round(rc.get("balance_after").getAsDouble());
+			
+			pay(sender, paid);
+			replyDM(sender,
+				"Payout #" + txnId + ": paid " + money(paid) + ", fee "
+					+ money(fee) + ". (bal " + money(before) + " → "
+					+ money(after) + ").");
+			
+		}catch(Exception e)
+		{
+			replyDM(sender, "Error processing withdrawal.");
+			if(debug.isChecked())
+				e.printStackTrace();
+		}
+	}
+	
+	// ----------------- Chat helpers -----------------
+	
+	private Long parseWalletBalance(String s)
+	{
+		java.util.regex.Pattern[] ps = new java.util.regex.Pattern[]{
+			// ECONOMY » Balance $630,004,500 (anywhere in line)
+			java.util.regex.Pattern.compile(
+				"(?i)\\bBalance\\b\\s*[:>\\-]?\\s*\\$?\\s*([\\d,]+)\\b"),
+			// Your balance is $5,000
+			java.util.regex.Pattern.compile(
+				"(?i)\\bYour\\s+balance\\s+(?:is\\s+)?\\$?\\s*([\\d,]+)\\b"),
+			// $5,000 balance
+			java.util.regex.Pattern
+				.compile("(?i)\\$\\s*([\\d,]+)\\s+balance\\b")};
+		for(var p : ps)
+		{
+			var m = p.matcher(s);
+			if(m.find())
+			{
+				try
+				{
+					return Long.parseLong(m.group(1).replace(",", ""));
+				}catch(Exception ignored)
+				{}
+			}
+		}
+		return null;
+	}
+	
+	private static String stripColors(String s)
+	{
+		if(s == null)
+			return "";
+		// color codes
+		s = s.replaceAll("§[0-9A-FK-ORa-fk-or]", "");
+		s = s.replaceAll("&[0-9A-FK-ORa-fk-or]", "");
+		// normalize weird spaces & arrows
+		s = s.replace('\u00A0', ' ') // NBSP -> space
+			.replace('\u2007', ' ').replace('\u202F', ' ').replace('➟', ' ') // arrow
+																				// used
+																				// by
+																				// many
+																				// servers
+			.replace('»', ' ');
+		// collapse
+		return s.replaceAll("\\s+", " ").trim();
+	}
+	
+	/** Ensure we have a fresh wallet balance; returns null on failure. */
+	private Long ensureFreshOwnBalance(long timeoutMs)
+	{
+		long now = System.currentTimeMillis();
+		if(ownCash != null && now - ownCashAtMs <= BALANCE_MAX_AGE_MS)
+			return ownCash; // still fresh
+			
+		requestOwnBalance(); // ask server
+		long end = now + Math.max(250, timeoutMs);
+		
+		synchronized(balanceLock)
+		{
+			while(System.currentTimeMillis() < end)
+			{
+				try
+				{
+					balanceLock.wait(100L);
+				}catch(InterruptedException ignored)
+				{}
+				if(ownCash != null && System.currentTimeMillis()
+					- ownCashAtMs <= BALANCE_MAX_AGE_MS)
+					return ownCash;
+			}
+		}
+		return null; // didn’t get it in time
+	}
+	
+	private void pay(String to, long amount)
+	{
+		if(MC.getNetworkHandler() == null)
+			return;
+		MC.getNetworkHandler().sendChatCommand("pay " + to + " " + amount);
+	}
+	
+	private void requestOwnBalance()
+	{
+		if(MC.getNetworkHandler() == null)
+			return;
+		MC.getNetworkHandler().sendChatCommand("balance");
+	}
+	
+	private void replyDM(String to, String msg)
+	{
+		if(MC.getNetworkHandler() == null)
+			return;
+		MC.getNetworkHandler().sendChatCommand("msg " + to + " " + msg);
+	}
+	
+	private static String money(long v)
+	{
+		var nf = NumberFormat.getNumberInstance(Locale.US);
+		return "$" + nf.format(v);
+	}
+	
+	// ----------------- Parsing -----------------
+	
+	private static class DM
+	{
+		final String sender;
+		final String msg;
+		
+		DM(String s, String m)
+		{
+			sender = s;
+			msg = m;
+		}
+	}
+	
+	private DM parseInboundDM(String raw, String myName)
+	{
+		// [Sender -> me] message
+		int b1 = raw.indexOf('[');
+		int b2 = raw.indexOf(']');
+		if(b1 >= 0 && b2 > b1)
+		{
+			String bracket = raw.substring(b1 + 1, b2).trim(); // e.g. "Vijay ->
+																// me"
+			if(bracket.contains("->"))
+			{
+				String[] p = bracket.split("->", 2);
+				String left = p[0].trim();
+				String right = p[1].trim();
+				if(right.equalsIgnoreCase("me")
+					|| right.equalsIgnoreCase(myName))
+				{
+					String msg = raw.substring(b2 + 1).trim();
+					// Ignore our own outgoing DMs: "[me -> Target]"
+					if(left.equalsIgnoreCase("me")
+						|| left.equalsIgnoreCase(myName))
+						return null;
+					return new DM(left, msg);
+				}
+			}
+		}
+		// From <Name>: message
+		if(raw.startsWith("From ") && raw.contains(":"))
+		{
+			int open = raw.indexOf('<'), close = raw.indexOf('>');
+			if(open >= 0 && close > open)
+			{
+				String sender = raw.substring(open + 1, close);
+				String msg =
+					raw.substring(close + 1).replaceFirst("^:\\s*", "").trim();
+				return new DM(sender, msg);
+			}
+			String rest = raw.substring("From ".length());
+			int colon = rest.indexOf(':');
+			if(colon > 0)
+			{
+				return new DM(rest.substring(0, colon).trim(),
+					rest.substring(colon + 1).trim());
+			}
+		}
+		return null;
+	}
+	
+	private static class DepositLine
+	{
+		final String sender;
+		final long amount;
+		
+		DepositLine(String s, long a)
+		{
+			sender = s;
+			amount = a;
+		}
+	}
+	
+	private boolean isServerEconomyDeposit(String clean)
+	{
+		// e.g. "ECONOMY » +$500 has been received from Rayyanxd99."
+		return clean.matches(
+			"(?i).*\\$?\\+?\\s*[\\d,]+\\s+has\\s+been\\s+received\\s+from\\s+[A-Za-z0-9_]{1,16}\\.?\\s*");
+	}
+	
+	private DepositLine parseServerDeposit(String clean)
+	{
+		try
+		{
+			var p = java.util.regex.Pattern.compile(
+				"(?i)\\$?\\+?\\s*([\\d,]+)\\s+has\\s+been\\s+received\\s+from\\s+([A-Za-z0-9_]{1,16})\\.?");
+			var m = p.matcher(clean);
+			if(!m.find())
+				return null;
+			long amount = Long.parseLong(m.group(1).replace(",", ""));
+			String sender = m.group(2);
+			return new DepositLine(sender, amount);
+		}catch(Exception e)
+		{
+			if(debug.isChecked())
+				e.printStackTrace();
+			return null;
+		}
+	}
+	
+	private Long parseAmount(String s)
+	{
+		if(s == null || s.isBlank())
+			return null;
+		s = s.replace(",", "").trim().toLowerCase(Locale.ROOT);
+		try
+		{
+			if(s.endsWith("k"))
+				return Math
+					.round(Double.parseDouble(s.substring(0, s.length() - 1))
+						* 1_000D);
+			if(s.endsWith("m"))
+				return Math
+					.round(Double.parseDouble(s.substring(0, s.length() - 1))
+						* 1_000_000D);
+			return Long.parseLong(s);
+		}catch(Exception e)
+		{
+			return null;
+		}
+	}
+}
