@@ -33,7 +33,7 @@ public final class CmdProcessor implements ChatOutputListener
 			return;
 		
 		String message = event.getOriginalMessage().trim();
-		if(!message.startsWith("."))
+		if(!message.startsWith("[]"))
 			return;
 		
 		event.cancel();

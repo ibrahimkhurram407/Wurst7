@@ -7,13 +7,9 @@
  */
 package net.wurstclient.hud;
 
-import net.minecraft.client.font.TextRenderer;
-import net.minecraft.client.gl.RenderPipelines;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.util.Identifier;
 import net.wurstclient.WurstClient;
-import net.wurstclient.other_features.WurstLogoOtf;
-import net.wurstclient.util.RenderUtils;
 
 public final class WurstLogo
 {
@@ -23,31 +19,34 @@ public final class WurstLogo
 	
 	public void render(DrawContext context)
 	{
-		WurstLogoOtf otf = WURST.getOtfs().wurstLogoOtf;
-		if(!otf.isVisible())
-			return;
-		
-		String version = getVersionString();
-		TextRenderer tr = WurstClient.MC.textRenderer;
-		
-		// background
-		int bgColor;
-		if(WURST.getHax().rainbowUiHack.isEnabled())
-			bgColor = RenderUtils.toIntColor(WURST.getGui().getAcColor(), 0.5F);
-		else
-			bgColor = otf.getBackgroundColor();
-		context.fill(0, 6, tr.getWidth(version) + 76, 17, bgColor);
-		
-		context.state.goUpLayer();
-		
-		// version string
-		context.drawText(tr, version, 74, 8, otf.getTextColor(), false);
-		
-		// Wurst logo
-		context.drawTexture(RenderPipelines.GUI_TEXTURED, LOGO_TEXTURE, 0, 3, 0,
-			0, 72, 18, 72, 18);
-		
-		context.state.goDownLayer();
+		return;
+		// if(!otf.isVisible()) {
+		// WurstLogoOtf otf = WURST.getOtfs().wurstLogoOtf;
+		// return;
+		// }
+		//
+		// String version = getVersionString();
+		// TextRenderer tr = WurstClient.MC.textRenderer;
+		//
+		// // background
+		// int bgColor;
+		// if(WURST.getHax().rainbowUiHack.isEnabled())
+		// bgColor = RenderUtils.toIntColor(WURST.getGui().getAcColor(), 0.5F);
+		// else
+		// bgColor = otf.getBackgroundColor();
+		// context.fill(0, 6, tr.getWidth(version) + 76, 17, bgColor);
+		//
+		// context.state.goUpLayer();
+		//
+		// // version string
+		// context.drawText(tr, version, 74, 8, otf.getTextColor(), false);
+		//
+		// // Wurst logo
+		// context.drawTexture(RenderPipelines.GUI_TEXTURED, LOGO_TEXTURE, 0, 3,
+		// 0,
+		// 0, 72, 18, 72, 18);
+		//
+		// context.state.goDownLayer();
 	}
 	
 	private String getVersionString()

@@ -191,15 +191,18 @@ public final class BankApiClient
 		JsonObject body = new JsonObject();
 		body.addProperty("player", player);
 		body.addProperty("fee", feePct);
-		if(note != null)
-			body.addProperty("note", note);
-		Request rq = req("/api/withdrawall")
+		body.addProperty("note", note == null ? "" : note);
+		
+		Request req = new Request.Builder().url(baseUrl + "/api/withdrawall")
+			.header("X-API-Key", apiKey)
 			.post(RequestBody.create(body.toString(), JSON)).build();
-		try(Response r = HTTP.newCall(rq).execute())
+		
+		try(Response res = HTTP.newCall(req).execute())
 		{
-			if(!r.isSuccessful())
+			if(!res.isSuccessful())
 				return null;
-			return JsonParser.parseString(r.body().string()).getAsJsonObject();
+			String s = res.body().string();
+			return JsonParser.parseString(s).getAsJsonObject();
 		}
 	}
 	

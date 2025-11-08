@@ -1,4 +1,8 @@
 buildscript {
+    repositories {
+        mavenCentral()
+        gradlePluginPortal()
+    }
 	dependencies {
 		classpath "org.kohsuke:github-api:1.330"
 	}
@@ -19,6 +23,7 @@ base {
 }
 
 repositories {
+    mavenCentral()
 	// Add repositories to retrieve artifacts from in here.
 	// You should only use this when depending on other mods because
 	// Loom adds the essential maven repositories to download Minecraft and libraries from automatically.
@@ -40,7 +45,11 @@ configurations.all {
 		// v9.40, used by Minecraft 1.21.4 - 1.21.8, is vulnerable to CVE-2025-53864
 		force "com.nimbusds:nimbus-jose-jwt:10.0.2"
 		// v4.1.118.Final, used by Minecraft 1.21.5 - 1.21.8, is vulnerable to CVE-2025-58057
-		force "io.netty:netty-codec:4.1.125.Final"
+        eachDependency { d ->
+            if (d.requested.group == "io.netty") {
+                d.useVersion "4.1.125.Final"
+            }
+        }
 	}
 }
 
@@ -69,9 +78,9 @@ dependencies {
     // --- Kotlin runtime needed by OkHttp/Okio ---
     modImplementation include("org.jetbrains.kotlin:kotlin-stdlib:1.9.24")
     modImplementation include("org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.9.24")
-    // OkHttp depends on Okio; include explicitly to be safe:
-    modImplementation include("com.squareup.okio:okio:3.9.0")
-    modImplementation include("com.google.code.gson:gson:2.11.0")
+
+
+
 }
 
 

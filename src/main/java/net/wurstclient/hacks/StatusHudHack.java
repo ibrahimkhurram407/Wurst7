@@ -43,7 +43,7 @@ public final class StatusHudHack extends Hack implements GUIRenderListener
 		new CheckboxSetting("Show labels (tiny)",
 			"Optional 2-letter labels; still compact.", false);
 	
-	// NEW: Which Mace hack should the Mace tile reflect?
+	// Which Mace hack the Mace tile reflects
 	private enum MaceTileSource
 	{
 		AUTO_MACE("AutoMace"),
@@ -78,7 +78,7 @@ public final class StatusHudHack extends Hack implements GUIRenderListener
 		addSetting(gap);
 		addSetting(columns);
 		addSetting(showLabels);
-		addSetting(maceTileSource); // NEW
+		addSetting(maceTileSource);
 	}
 	
 	@Override
@@ -106,41 +106,36 @@ public final class StatusHudHack extends Hack implements GUIRenderListener
 		int g = gap.getValueI();
 		int cols = Math.max(1, columns.getValueI());
 		
-		// Gather statuses
+		// Statuses
 		boolean maceOn = false, preferElytra = false, preferFireworks = false;
 		boolean eatOn = false, anchorOn = false, crystalOn = false,
 			totemOn = false;
 		boolean kaLegitOn = false;
 		
-		// Mace tile: either AutoMace or AutoMaceBlatant (configurable)
+		// Read from chosen Mace hack (supports both autoMaceHack and
+		// autoMaceBlatantHack)
 		try
 		{
+			Object maceHack = null;
 			switch(maceTileSource.getSelected())
 			{
 				case AUTO_MACE:
-				{
-					var am = WURST.getHax().autoMaceHack;
-					if(am != null)
-					{
-						maceOn = am.isEnabled();
-						preferElytra = am.isPreferElytraAir();
-						preferFireworks = am.isPreferFireworks();
-					}
-					break;
-				}
+				maceHack = WURST.getHax().autoMaceHack;
+				break;
 				case AUTO_MACE_BLATANT:
-				{
-					// Blatant usually won’t have elytra/firework prefs; treat
-					// as false safely.
-					var amb = WURST.getHax().AutoMaceBlatantHack;
-					if(amb != null)
-					{
-						maceOn = amb.isEnabled();
-						preferElytra = false;
-						preferFireworks = false;
-					}
-					break;
-				}
+				maceHack = WURST.getHax().AutoMaceBlatantHack;
+				break;
+			}
+			if(maceHack != null)
+			{
+				maceOn = safeBoolean(maceHack, "isEnabled", null, false);
+				
+				// Prefer Elytra / Fireworks — try method names first, then
+				// fields
+				preferElytra = safeBoolean(maceHack, "isPreferElytraAir",
+					"preferElytraAir", false);
+				preferFireworks = safeBoolean(maceHack, "isPreferFireworks",
+					"preferFireworks", false);
 			}
 		}catch(Throwable ignored)
 		{}
@@ -177,7 +172,6 @@ public final class StatusHudHack extends Hack implements GUIRenderListener
 		}catch(Throwable ignored)
 		{}
 		
-		// NEW: KillAuraLegit status
 		try
 		{
 			var kal = WURST.getHax().killauraLegitHack;
@@ -186,7 +180,7 @@ public final class StatusHudHack extends Hack implements GUIRenderListener
 		}catch(Throwable ignored)
 		{}
 		
-		// Tiles (compact, square)
+		// Tiles
 		Tile[] tiles = new Tile[]{
 			new Tile(new ItemStack(Items.MACE), maceOn, "MC"),
 			new Tile(new ItemStack(Items.ELYTRA), preferElytra, "EL"),
@@ -196,7 +190,6 @@ public final class StatusHudHack extends Hack implements GUIRenderListener
 			new Tile(new ItemStack(Items.RESPAWN_ANCHOR), anchorOn, "AN"),
 			new Tile(new ItemStack(Items.END_CRYSTAL), crystalOn, "CR"),
 			new Tile(new ItemStack(Items.TOTEM_OF_UNDYING), totemOn, "TT"),
-			// NEW: KillAuraLegit
 			new Tile(new ItemStack(Items.NETHERITE_SWORD), kaLegitOn, "KL")};
 		
 		// Render grid
@@ -206,7 +199,6 @@ public final class StatusHudHack extends Hack implements GUIRenderListener
 			int drawX = baseX + xIdx * (size + g);
 			int drawY = baseY + yIdx * (size + g);
 			drawTile(ctx, drawX, drawY, size, pad, t);
-			
 			xIdx++;
 			if(xIdx >= cols)
 			{
@@ -214,6 +206,36 @@ public final class StatusHudHack extends Hack implements GUIRenderListener
 				yIdx++;
 			}
 		}
+	}
+	
+	// --- reflection helpers so we can read prefs from either hack variant ---
+	private boolean safeBoolean(Object obj, String getterName, String fieldName,
+		boolean defVal)
+	{
+		if(obj == null)
+			return defVal;
+		try
+		{
+			// Try no-arg boolean getter
+			var m = obj.getClass().getMethod(getterName);
+			Object v = m.invoke(obj);
+			if(v instanceof Boolean)
+				return (Boolean)v;
+		}catch(Throwable ignored)
+		{}
+		if(fieldName != null)
+		{
+			try
+			{
+				var f = obj.getClass().getDeclaredField(fieldName);
+				f.setAccessible(true);
+				Object v = f.get(obj);
+				if(v instanceof Boolean)
+					return (Boolean)v;
+			}catch(Throwable ignored)
+			{}
+		}
+		return defVal;
 	}
 	
 	private static final class Tile
@@ -236,16 +258,13 @@ public final class StatusHudHack extends Hack implements GUIRenderListener
 		int border = t.on ? 0xA000A040 /* green-ish */ : 0xA0404040 /* gray */;
 		int fill = t.on ? 0x6000A040 : 0x50000000;
 		
-		// Outer border + inner fill
 		ctx.fill(x, y, x + size, y + size, border);
 		ctx.fill(x + 1, y + 1, x + size - 1, y + size - 1, fill);
 		
-		// Centered 16x16 icon
 		int iconX = x + (size - 16) / 2;
 		int iconY = y + (size - 16) / 2;
 		ctx.drawItem(t.icon, iconX, iconY);
 		
-		// Tiny corner label
 		if(showLabels.isChecked() && MC.textRenderer != null)
 		{
 			int col = t.on ? 0xFFFFFF : 0xB0B0B0;

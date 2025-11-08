@@ -37,7 +37,6 @@ import net.wurstclient.settings.CheckboxSetting;
 import net.wurstclient.settings.SliderSetting;
 import net.wurstclient.settings.SliderSetting.ValueDisplay;
 import net.wurstclient.settings.TextFieldSetting;
-import net.wurstclient.util.ChatUtils;
 import net.wurstclient.util.InventoryUtils;
 import net.wurstclient.WurstClient;
 import net.wurstclient.mixinterface.IMinecraftClient;
@@ -130,7 +129,7 @@ public final class AutoMaceBlatantHack extends Hack
 		EVENTS.add(UpdateListener.class, this);
 		EVENTS.add(HandleInputListener.class, this);
 		EVENTS.add(RenderListener.class, this);
-		ChatUtils.message("AutoMace enabled");
+		// ChatUtils.message("AutoMace enabled");
 	}
 	
 	@Override
@@ -142,7 +141,7 @@ public final class AutoMaceBlatantHack extends Hack
 		if(MC.player != null && lastHeldSlot >= 0)
 			MC.player.getInventory().setSelectedSlot(lastHeldSlot);
 		lastHeldSlot = -1;
-		ChatUtils.message("AutoMace disabled");
+		// ChatUtils.message("AutoMace disabled");
 	}
 	
 	@Override

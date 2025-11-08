@@ -34,7 +34,7 @@ public final class BankManagerHack extends Hack
 	
 	// This client/bot IGN (used in /pay sender)
 	private final TextFieldSetting myIgn =
-		new TextFieldSetting("My IGN (bot account)", "ibrahimtest");
+		new TextFieldSetting("My IGN (bot account)", "imperial_bank");
 	
 	// ---- Feature toggles ----
 	private final CheckboxSetting enableDeposits =
@@ -48,6 +48,12 @@ public final class BankManagerHack extends Hack
 	private final SliderSetting defaultFeePct =
 		new SliderSetting("Default fee % (payout/withdraw all)", "", 7, 0, 25,
 			1, SliderSetting.ValueDisplay.DECIMAL);
+	private final SliderSetting payCooldownSec =
+		new SliderSetting("Server /pay cooldown (sec)", "", 5, 0, 30, 1,
+			SliderSetting.ValueDisplay.DECIMAL);
+	private final SliderSetting perUserWithdrawCooldownSec =
+		new SliderSetting("Per-user withdraw cooldown (sec)", "", 5, 0, 120, 1,
+			SliderSetting.ValueDisplay.DECIMAL);
 	
 	private final SliderSetting healthCheckEverySec =
 		new SliderSetting("Health check interval (seconds)", "", 60, 10, 600, 5,
@@ -59,9 +65,11 @@ public final class BankManagerHack extends Hack
 	// ---- Ads ----
 	private final CheckboxSetting enableAds =
 		new CheckboxSetting("Send advertising message", true);
-	private final TextFieldSetting adMessage = new TextFieldSetting(
+	private final TextFieldSetting adMessage1 = new TextFieldSetting(
 		"Ad text (public chat)",
 		"§6[Bank]§r DM me “deposit”, “withdraw”, or “balance”. Earn interest, instant payouts!");
+	private final TextFieldSetting adMessage2 = new TextFieldSetting("Ad #2",
+		"Imperial is Bringing  horse races soon!, earn big prize pool!");
 	private final SliderSetting adEverySec =
 		new SliderSetting("Ad interval (seconds)", "", 180, 30, 1800, 10,
 			SliderSetting.ValueDisplay.DECIMAL);
@@ -81,8 +89,30 @@ public final class BankManagerHack extends Hack
 	private volatile long ownCashAtMs = 0L; // timestamp parsed
 	private final Object balanceLock = new Object(); // notify/wait for parse
 	
+	// Queue/worker to serialize /pay calls
+	private static final class PayJob
+	{
+		final String to;
+		final long amount;
+		
+		PayJob(String t, long a)
+		{
+			to = t;
+			amount = a;
+		}
+	}
+	
+	private final java.util.concurrent.LinkedBlockingQueue<PayJob> payQueue =
+		new java.util.concurrent.LinkedBlockingQueue<>();
+	private volatile boolean runPayWorker = false;
+	private Thread payWorker;
+	
+	private final java.util.concurrent.ConcurrentHashMap<String, Long> lastWithdrawAt =
+		new java.util.concurrent.ConcurrentHashMap<>();
+	
 	// how long a parsed balance is considered fresh
 	private static final long BALANCE_MAX_AGE_MS = 10_000L; // 10s
+	private int nextAdIndex = 0; // 0 -> ad1, 1 -> ad2
 	
 	public BankManagerHack()
 	{
@@ -101,11 +131,15 @@ public final class BankManagerHack extends Hack
 		addSetting(healthCheckEverySec);
 		
 		addSetting(enableAds);
-		addSetting(adMessage);
+		addSetting(adMessage1);
+		addSetting(adMessage2);
 		addSetting(adEverySec);
 		
 		addSetting(maxSingleWithdraw);
 		addSetting(debug);
+		addSetting(payCooldownSec);
+		addSetting(perUserWithdrawCooldownSec);
+		
 	}
 	
 	@Override
@@ -122,6 +156,7 @@ public final class BankManagerHack extends Hack
 			System.currentTimeMillis() + (long)adEverySec.getValue() * 1000L);
 		if(debug.isChecked())
 			System.out.println("[BankManager] enabled");
+		startPayWorker();
 	}
 	
 	@Override
@@ -131,6 +166,7 @@ public final class BankManagerHack extends Hack
 		EVENTS.remove(UpdateListener.class, this);
 		if(debug.isChecked())
 			System.out.println("[BankManager] disabled");
+		stopPayWorker();
 	}
 	
 	// ----------------- Update: ads -----------------
@@ -165,24 +201,65 @@ public final class BankManagerHack extends Hack
 		if(now < nextAdAt.get())
 			return;
 		
-		String msg = adMessage.getValue();
+		String msg =
+			(nextAdIndex == 0 ? adMessage1.getValue() : adMessage2.getValue());
 		if(msg == null)
 			msg = "";
-		
-		// strip any section sign formatting to avoid "illegal characters"
 		msg = msg.replaceAll("§.", "");
 		
-		if(bankHealthy)
-		{
-			if(!msg.isBlank())
-				MC.getNetworkHandler().sendChatMessage(msg);
-		}else
-		{
+		if(bankHealthy && !msg.isBlank())
+			MC.getNetworkHandler().sendChatMessage(msg);
+		else if(!bankHealthy)
 			MC.getNetworkHandler()
 				.sendChatMessage("[Bank] temporarily offline. Try again soon.");
-		}
 		
+		nextAdIndex = 1 - nextAdIndex; // alternate
 		nextAdAt.set(now + (long)adEverySec.getValue() * 1000L);
+	}
+	
+	private void startPayWorker()
+	{
+		runPayWorker = true;
+		payWorker = Thread.ofVirtual().start(() -> {
+			long lastPayAt = 0L;
+			final long padMs = 200L; // safety pad
+			while(runPayWorker)
+			{
+				try
+				{
+					PayJob job = payQueue.take();
+					long now = System.currentTimeMillis();
+					long cool = (long)(payCooldownSec.getValue() * 1000L);
+					long wait =
+						(lastPayAt == 0 ? 0 : (cool - (now - lastPayAt)));
+					if(wait > 0)
+						Thread.sleep(wait + padMs);
+					pay(job.to, job.amount); // single /pay here
+					lastPayAt = System.currentTimeMillis();
+				}catch(InterruptedException ie)
+				{
+					// exit gracefully when disabling
+					Thread.currentThread().interrupt();
+				}catch(Throwable t)
+				{
+					if(debug.isChecked())
+						t.printStackTrace();
+				}
+			}
+		});
+	}
+	
+	private void stopPayWorker()
+	{
+		runPayWorker = false;
+		if(payWorker != null)
+			payWorker.interrupt();
+		payWorker = null;
+	}
+	
+	private void enqueuePay(String to, long amount)
+	{
+		payQueue.offer(new PayJob(to, amount));
 	}
 	
 	// ----------------- Chat intake -----------------
@@ -242,8 +319,25 @@ public final class BankManagerHack extends Hack
 					"Withdrawals are currently paused. Try later.");
 				return;
 			}
+			long now = System.currentTimeMillis();
+			long last = lastWithdrawAt.getOrDefault(dm.sender, 0L);
+			long coolMs = (long)(perUserWithdrawCooldownSec.getValue() * 1000L);
+			long left = coolMs - (now - last);
+			if(left > 0)
+			{
+				replyDM(dm.sender, "Please wait " + Math.ceil(left / 1000.0)
+					+ "s before withdrawing again.");
+				return;
+			}
+			lastWithdrawAt.put(dm.sender, now);
 			String arg = cmd.replaceFirst("withdraw", "").trim();
-			Thread.ofVirtual().stalrt(() -> handleWithdraw(dm.sender, arg));
+			Thread.ofVirtual().start(() -> handleWithdraw(dm.sender, arg));
+			return;
+		}
+		if(cmd.equals("deposit"))
+		{
+			replyDM(dm.sender,
+				"To deposit, use: /pay " + myIgn.getValue() + " <amount>");
 			return;
 		}
 		if(cmd.equals("balance") || cmd.equals("bal"))
@@ -343,49 +437,22 @@ public final class BankManagerHack extends Hack
 		try
 		{
 			long feePct = (long)defaultFeePct.getValue();
-			Long amt = parseAmount(amountArg);
-			if(amt == null || amt <= 0)
-			{
-				replyDM(sender,
-					"Usage: withdraw <amount|all>. Example: withdraw 250k");
-				return;
-			}
-			if(amt > (long)maxSingleWithdraw.getValue())
-			{
-				replyDM(sender, "Max per withdrawal is "
-					+ money((long)maxSingleWithdraw.getValue()) + ".");
-				return;
-			}
 			
-			// If enabled, verify we can actually /pay the player
-			if(checkOwnBalanceBeforePay.isChecked())
+			// --- ALL branch first ---
+			if(amountArg != null && amountArg.equalsIgnoreCase("all"))
 			{
-				Long wallet = ensureFreshOwnBalance(2000); // wait up to 2s
-				if(wallet == null)
+				if(checkOwnBalanceBeforePay.isChecked())
 				{
-					replyDM(sender,
-						"Could not verify funds. Please try again in a moment.");
-					return;
+					Long wallet = ensureFreshOwnBalance(2000);
+					if(wallet == null || wallet <= 0)
+					{
+						replyDM(sender,
+							"Could not verify funds. Please try again in a moment.");
+						return;
+					}
 				}
-				if(wallet < amt)
-				{
-					replyDM(sender, "Insufficient funds in my wallet: have "
-						+ money(wallet) + ", need " + money(amt) + ".");
-					return;
-				}
-			}
-			
-			// now safe to hit bank API
-			var res = bank.payoutR(sender, amt, feePct, "user request");
-			if(res == null || !res.has("ok") || !res.get("ok").getAsBoolean())
-			{
-				replyDM(sender,
-					"Withdrawal failed. Maybe insufficient bank balance.");
-				return;
-			}
-			
-			if(amountArg.equalsIgnoreCase("all"))
-			{
+				var res = bank.withdrawAllR(sender,
+					(long)defaultFeePct.getValue(), "user request: all");
 				if(res == null || !res.has("ok")
 					|| !res.get("ok").getAsBoolean())
 				{
@@ -401,7 +468,7 @@ public final class BankManagerHack extends Hack
 					Math.round(rc.get("before_balance").getAsDouble());
 				long after = Math.round(rc.get("balance_after").getAsDouble());
 				
-				pay(sender, paid);
+				enqueuePay(sender, paid);
 				replyDM(sender,
 					"Withdraw-all #" + txnId + ": paid " + money(paid)
 						+ ", fee " + money(fee) + ". (bal " + money(before)
@@ -409,6 +476,8 @@ public final class BankManagerHack extends Hack
 				return;
 			}
 			
+			// --- Numeric amount path ---
+			Long amt = parseAmount(amountArg);
 			if(amt == null || amt <= 0)
 			{
 				replyDM(sender,
@@ -424,10 +493,22 @@ public final class BankManagerHack extends Hack
 			
 			if(checkOwnBalanceBeforePay.isChecked())
 			{
-				requestOwnBalance();
-				Thread.sleep(750);
+				Long wallet = ensureFreshOwnBalance(2000);
+				if(wallet == null)
+				{
+					replyDM(sender,
+						"Could not verify funds. Please try again in a moment.");
+					return;
+				}
+				if(wallet < amt)
+				{
+					replyDM(sender, "Insufficient funds in my wallet: have "
+						+ money(wallet) + ", need " + money(amt) + ".");
+					return;
+				}
 			}
 			
+			var res = bank.payoutR(sender, amt, feePct, "user request");
 			if(res == null || !res.has("ok") || !res.get("ok").getAsBoolean())
 			{
 				replyDM(sender,
@@ -443,7 +524,7 @@ public final class BankManagerHack extends Hack
 			long before = Math.round(rc.get("before_balance").getAsDouble());
 			long after = Math.round(rc.get("balance_after").getAsDouble());
 			
-			pay(sender, paid);
+			enqueuePay(sender, paid);
 			replyDM(sender,
 				"Payout #" + txnId + ": paid " + money(paid) + ", fee "
 					+ money(fee) + ". (bal " + money(before) + " → "
@@ -636,8 +717,9 @@ public final class BankManagerHack extends Hack
 	private boolean isServerEconomyDeposit(String clean)
 	{
 		// e.g. "ECONOMY » +$500 has been received from Rayyanxd99."
+		
 		return clean.matches(
-			"(?i).*\\$?\\+?\\s*[\\d,]+\\s+has\\s+been\\s+received\\s+from\\s+[A-Za-z0-9_]{1,16}\\.?\\s*");
+			"(?i).*\\$?\\+?\\s*[\\d,]+\\s+has\\s+been\\s+received\\s+from\\s+[.]?[A-Za-z0-9_]{1,31}\\.?\\s*");
 	}
 	
 	private DepositLine parseServerDeposit(String clean)
@@ -645,7 +727,7 @@ public final class BankManagerHack extends Hack
 		try
 		{
 			var p = java.util.regex.Pattern.compile(
-				"(?i)\\$?\\+?\\s*([\\d,]+)\\s+has\\s+been\\s+received\\s+from\\s+([A-Za-z0-9_]{1,16})\\.?");
+				"(?i)\\$?\\+?\\s*([\\d,]+)\\s+has\\s+been\\s+received\\s+from\\s+([.]?[A-Za-z0-9_]{1,31})\\.?");
 			var m = p.matcher(clean);
 			if(!m.find())
 				return null;

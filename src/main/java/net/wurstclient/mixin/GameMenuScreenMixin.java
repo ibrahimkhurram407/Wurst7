@@ -8,7 +8,6 @@
 package net.wurstclient.mixin;
 
 import java.util.ArrayList;
-import java.util.List;
 
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
@@ -24,7 +23,6 @@ import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.widget.ButtonWidget;
 import net.minecraft.client.gui.widget.ClickableWidget;
 import net.minecraft.client.resource.language.I18n;
-import net.minecraft.text.MutableText;
 import net.minecraft.text.Text;
 import net.minecraft.util.Identifier;
 import net.wurstclient.WurstClient;
@@ -79,42 +77,43 @@ public abstract class GameMenuScreenMixin extends Screen
 	@Unique
 	private void addWurstOptionsButton()
 	{
-		List<ClickableWidget> buttons = Screens.getButtons(this);
-		
-		// Fallback position
-		int buttonX = width / 2 - 102;
-		int buttonY = 60;
-		int buttonWidth = 204;
-		int buttonHeight = 20;
-		
-		for(ClickableWidget button : buttons)
-		{
-			// If feedback button exists, use its position
-			if(isTrKey(button, "menu.sendFeedback")
-				|| isTrKey(button, "menu.feedback"))
-			{
-				buttonY = button.getY();
-				break;
-			}
-			
-			// If options button exists, go 24px above it
-			if(isTrKey(button, "menu.options"))
-			{
-				buttonY = button.getY() - 24;
-				break;
-			}
-		}
-		
-		// Clear required space for Wurst Options
-		hideFeedbackReportAndServerLinksButtons();
-		ensureSpaceAvailable(buttonX, buttonY, buttonWidth, buttonHeight);
-		
-		// Create Wurst Options button
-		MutableText buttonText = Text.literal("            Options");
-		wurstOptionsButton = ButtonWidget
-			.builder(buttonText, b -> openWurstOptions())
-			.dimensions(buttonX, buttonY, buttonWidth, buttonHeight).build();
-		buttons.add(wurstOptionsButton);
+		return;
+		// List<ClickableWidget> buttons = Screens.getButtons(this);
+		//
+		// // Fallback position
+		// int buttonX = width / 2 - 102;
+		// int buttonY = 60;
+		// int buttonWidth = 204;
+		// int buttonHeight = 20;
+		//
+		// for(ClickableWidget button : buttons)
+		// {
+		// // If feedback button exists, use its position
+		// if(isTrKey(button, "menu.sendFeedback")
+		// || isTrKey(button, "menu.feedback"))
+		// {
+		// buttonY = button.getY();
+		// break;
+		// }
+		//
+		// // If options button exists, go 24px above it
+		// if(isTrKey(button, "menu.options"))
+		// {
+		// buttonY = button.getY() - 24;
+		// break;
+		// }
+		// }
+		//
+		// // Clear required space for Wurst Options
+		// hideFeedbackReportAndServerLinksButtons();
+		// ensureSpaceAvailable(buttonX, buttonY, buttonWidth, buttonHeight);
+		//
+		// // Create Wurst Options button
+		// MutableText buttonText = Text.literal(" Options");
+		// wurstOptionsButton = ButtonWidget
+		// .builder(buttonText, b -> openWurstOptions())
+		// .dimensions(buttonX, buttonY, buttonWidth, buttonHeight).build();
+		// buttons.add(wurstOptionsButton);
 	}
 	
 	@Unique
