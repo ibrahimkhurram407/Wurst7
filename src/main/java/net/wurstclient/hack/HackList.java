@@ -86,6 +86,7 @@ public final class HackList implements UpdateListener
 		new ChatGptResponderHack();
 	public final ChatTranslatorHack chatTranslatorHack =
 		new ChatTranslatorHack();
+	public final CEGrinderHack CEGrinderHack = new CEGrinderHack();
 	public final ChestEspHack chestEspHack = new ChestEspHack();
 	public final ClickAuraHack clickAuraHack = new ClickAuraHack();
 	public final ClickGuiHack clickGuiHack = new ClickGuiHack();
@@ -192,6 +193,8 @@ public final class HackList implements UpdateListener
 	public final TillauraHack tillauraHack = new TillauraHack();
 	public final TimerHack timerHack = new TimerHack();
 	public final TiredHack tiredHack = new TiredHack();
+	public final TinkererOpenerHack TinkererOpenerHack =
+		new TinkererOpenerHack();
 	public final TntAuraHack tntAuraHack = new TntAuraHack();
 	public final TooManyHaxHack tooManyHaxHack = new TooManyHaxHack();
 	public final TpAuraHack tpAuraHack = new TpAuraHack();

@@ -52,11 +52,44 @@ public final class BankApiClient
 			.header("X-API-Key", apiKey);
 	}
 	
+	// --- helpers for JSON GET/POST (safe, null on non-2xx) ---
+	private JsonObject doGetJson(String path) throws IOException
+	{
+		Request rq = req(path).get().build();
+		try(Response r = HTTP.newCall(rq).execute())
+		{
+			if(!r.isSuccessful() || r.body() == null)
+				return null;
+			String s = r.body().string();
+			JsonElement el = JsonParser.parseString(s);
+			return el != null && el.isJsonObject() ? el.getAsJsonObject()
+				: null;
+		}
+	}
+	
+	private JsonObject doPostJson(String path, JsonObject body)
+		throws IOException
+	{
+		if(body == null)
+			body = new JsonObject();
+		Request rq =
+			req(path).post(RequestBody.create(body.toString(), JSON)).build();
+		try(Response r = HTTP.newCall(rq).execute())
+		{
+			if(!r.isSuccessful() || r.body() == null)
+				return null;
+			String s = r.body().string();
+			JsonElement el = JsonParser.parseString(s);
+			return el != null && el.isJsonObject() ? el.getAsJsonObject()
+				: null;
+		}
+	}
+	
 	// ---------- health ----------
 	public boolean healthOk() throws IOException
 	{
 		Request rq =
-			new Request.Builder().url(baseUrl + "/healthz").get().build();
+			new Request.Builder().url(baseUrl + "/api/healthz").get().build();
 		try(Response r = HTTP.newCall(rq).execute())
 		{
 			if(!r.isSuccessful())
@@ -204,6 +237,48 @@ public final class BankApiClient
 			String s = res.body().string();
 			return JsonParser.parseString(s).getAsJsonObject();
 		}
+	}
+	
+	// GET /api/races/info
+	public JsonObject racesInfo() throws IOException
+	{
+		return doGetJson("/api/races/info");
+	}
+	
+	// POST /api/races/new { "name": "...", "starts_at": "2025-11-09T12:00:00Z"
+	// }
+	public JsonObject racesNew(String name, String startsAtIsoUtc)
+		throws IOException
+	{
+		JsonObject body = new JsonObject();
+		body.addProperty("name", name);
+		body.addProperty("starts_at", startsAtIsoUtc);
+		return doPostJson("/api/races/new", body);
+	}
+	
+	// POST /api/races/enroll { "player_name": "IGN" }
+	public JsonObject raceEnroll(String playerName) throws IOException
+	{
+		JsonObject body = new JsonObject();
+		body.addProperty("player_name", playerName);
+		return doPostJson("/api/races/enroll", body);
+	}
+	
+	// POST /api/races/winner{1|2|3} { "player_name": "IGN" }
+	public JsonObject raceWinner(int position, String playerName)
+		throws IOException
+	{
+		int pos = Math.max(1, Math.min(3, position));
+		String path = "/api/races/winner" + pos;
+		JsonObject body = new JsonObject();
+		body.addProperty("player_name", playerName);
+		return doPostJson(path, body);
+	}
+	
+	// POST /api/races/end {}
+	public JsonObject raceEnd() throws IOException
+	{
+		return doPostJson("/api/races/end", new JsonObject());
 	}
 	
 	public JsonObject getPlayerDetailR(String player) throws IOException

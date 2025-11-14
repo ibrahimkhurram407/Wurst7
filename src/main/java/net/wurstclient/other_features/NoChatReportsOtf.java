@@ -7,21 +7,15 @@
  */
 package net.wurstclient.other_features;
 
-import java.net.URI;
-
 import net.fabricmc.fabric.api.client.networking.v1.ClientLoginConnectionEvents;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.hud.MessageIndicator;
-import net.minecraft.client.gui.hud.MessageIndicator.Icon;
 import net.minecraft.client.network.ClientLoginNetworkHandler;
 import net.minecraft.client.network.ClientPlayNetworkHandler;
 import net.minecraft.network.encryption.ClientPlayerSession;
 import net.minecraft.network.message.MessageChain;
 import net.minecraft.network.message.MessageSignatureData;
-import net.minecraft.text.ClickEvent;
-import net.minecraft.text.HoverEvent;
 import net.minecraft.text.Text;
-import net.minecraft.text.TranslatableTextContent;
 import net.wurstclient.Category;
 import net.wurstclient.DontBlock;
 import net.wurstclient.SearchTags;
@@ -29,7 +23,6 @@ import net.wurstclient.events.ChatInputListener;
 import net.wurstclient.events.UpdateListener;
 import net.wurstclient.other_feature.OtherFeature;
 import net.wurstclient.settings.CheckboxSetting;
-import net.wurstclient.util.ChatUtils;
 
 @DontBlock
 @SearchTags({"no chat reports", "NoEncryption", "no encryption",
@@ -81,28 +74,8 @@ public final class NoChatReportsOtf extends OtherFeature
 	@Override
 	public void onReceivedMessage(ChatInputEvent event)
 	{
-		if(!isActive())
-			return;
-		
-		Text originalText = event.getComponent();
-		if(!(originalText
-			.getContent() instanceof TranslatableTextContent trContent))
-			return;
-		
-		if(!trContent.getKey().equals("chat.disabled.missingProfileKey"))
-			return;
-		
-		event.cancel();
-		
-		ClickEvent clickEvent = new ClickEvent.OpenUrl(
-			URI.create("https://www.wurstclient.net/chat-disabled-mpk/"));
-		HoverEvent hoverEvent = new HoverEvent.ShowText(
-			Text.literal("Original message: ").append(originalText));
-		
-		ChatUtils.component(Text.literal(
-			"The server is refusing to let you chat without enabling chat reports. Click \u00a7nhere\u00a7r to learn more.")
-			.styled(
-				s -> s.withClickEvent(clickEvent).withHoverEvent(hoverEvent)));
+		return; // completely suppresses the “chat disabled / click here”
+				// message
 	}
 	
 	private void onLoginStart(ClientLoginNetworkHandler handler,
@@ -114,17 +87,8 @@ public final class NoChatReportsOtf extends OtherFeature
 	public MessageIndicator modifyIndicator(Text message,
 		MessageSignatureData signature, MessageIndicator indicator)
 	{
-		if(!WURST.isEnabled() || MC.isInSingleplayer())
-			return indicator;
-		
-		if(indicator != null || signature == null)
-			return indicator;
-		
-		return new MessageIndicator(0xE84F58, Icon.CHAT_MODIFIED,
-			Text.literal(ChatUtils.WURST_PREFIX + "\u00a7cReportable\u00a7r - "
-				+ WURST.translate(
-					"description.wurst.nochatreports.message_is_reportable")),
-			"Reportable");
+		// Don’t add any indicator — leave whatever was already there.
+		return indicator;
 	}
 	
 	@Override

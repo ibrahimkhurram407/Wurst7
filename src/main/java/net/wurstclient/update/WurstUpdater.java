@@ -103,18 +103,19 @@ public final class WurstUpdater implements UpdateListener
 			return;
 		}
 		
-		if(!outdated)
-			return;
+		// if(!outdated)
+		return;
 		
-		String text = "Wurst " + latestVersion
-			+ " is now available for Minecraft " + WurstClient.MC_VERSION
-			+ ". \u00a7nUpdate now\u00a7r to benefit from new features and/or bugfixes!";
-		String utmContent = currentVersionEncoded + "+update+chat+message";
-		
-		String url = baseUrl + "?utm_source=" + utmSource + "&utm_medium="
-			+ utmMedium + "&utm_content=" + utmContent;
-		
-		showLink(text, url);
+		// String text = "Wurst " + latestVersion
+		// + " is now available for Minecraft " + WurstClient.MC_VERSION
+		// + ". \u00a7nUpdate now\u00a7r to benefit from new features and/or
+		// bugfixes!";
+		// String utmContent = currentVersionEncoded + "+update+chat+message";
+		//
+		// String url = baseUrl + "?utm_source=" + utmSource + "&utm_medium="
+		// + utmMedium + "&utm_content=" + utmContent;
+		//
+		// showLink(text, url);
 	}
 	
 	private void showLink(String text, String url)

@@ -36,6 +36,10 @@ public final class BankManagerHack extends Hack
 	private final TextFieldSetting myIgn =
 		new TextFieldSetting("My IGN (bot account)", "imperial_bank");
 	
+	private final TextFieldSetting adminUsersCsv =
+		new TextFieldSetting("Race admins (comma-separated IGNs)",
+			"ibrahimtest,Ibrahim407,abdullah_678,hassanxsaeed_876");
+	
 	// ---- Feature toggles ----
 	private final CheckboxSetting enableDeposits =
 		new CheckboxSetting("Accept deposits (auto-ledger)", true);
@@ -44,7 +48,7 @@ public final class BankManagerHack extends Hack
 	private final CheckboxSetting respondToDMs =
 		new CheckboxSetting("Respond to DMs", true);
 	private final CheckboxSetting checkOwnBalanceBeforePay =
-		new CheckboxSetting("Run /balance before paying", false);
+		new CheckboxSetting("Run /balance before paying", true);
 	private final SliderSetting defaultFeePct =
 		new SliderSetting("Default fee % (payout/withdraw all)", "", 7, 0, 25,
 			1, SliderSetting.ValueDisplay.DECIMAL);
@@ -122,6 +126,7 @@ public final class BankManagerHack extends Hack
 		addSetting(apiBase);
 		addSetting(apiKey);
 		addSetting(myIgn);
+		addSetting(adminUsersCsv);
 		
 		addSetting(enableDeposits);
 		addSetting(enableWithdrawals);
@@ -234,8 +239,29 @@ public final class BankManagerHack extends Hack
 						(lastPayAt == 0 ? 0 : (cool - (now - lastPayAt)));
 					if(wait > 0)
 						Thread.sleep(wait + padMs);
-					pay(job.to, job.amount); // single /pay here
+					
+					// >>> New: re-check wallet right before paying
+					if(checkOwnBalanceBeforePay.isChecked())
+					{
+						if(!ensureWalletAtLeast(job.amount, 2500))
+						{
+							// Not enough funds right now. Requeue to try later
+							// and give some breathing room.
+							if(debug.isChecked())
+								System.out.println(
+									"[BankManager] Insufficient wallet for /pay "
+										+ job.to + " " + job.amount
+										+ ", requeuing");
+							Thread.sleep(2000); // small backoff so we don't
+												// spin
+							payQueue.offer(job); // requeue at tail
+							continue; // try next job / loop
+						}
+					}
+					
+					pay(job.to, job.amount);
 					lastPayAt = System.currentTimeMillis();
+					
 				}catch(InterruptedException ie)
 				{
 					// exit gracefully when disabling
@@ -311,6 +337,12 @@ public final class BankManagerHack extends Hack
 			return; // ignore non-DMs / own echoes
 			
 		String cmd = dm.msg.trim().toLowerCase(Locale.ROOT);
+		// --- Race commands ---
+		if(cmd.startsWith("race"))
+		{
+			Thread.ofVirtual().start(() -> handleRaceCommand(dm.sender, cmd));
+			return;
+		}
 		if(cmd.startsWith("withdraw"))
 		{
 			if(!enableWithdrawals.isChecked())
@@ -351,6 +383,304 @@ public final class BankManagerHack extends Hack
 				"Commands: balance | withdraw <amount|all>. To deposit, /pay "
 					+ myIgn.getValue() + " <amount>.");
 			return;
+		}
+	}
+	
+	// ----------------- Horse Race commands -----------------
+	private static final java.time.ZoneId Z_PK =
+		java.time.ZoneId.of("Asia/Karachi");
+	
+	private void handleRaceCommand(String sender, String full)
+	{
+		try
+		{
+			String[] parts = full.split("\\s+", 3); // "race", sub, rest
+			String sub = parts.length >= 2 ? parts[1] : "";
+			String rest = parts.length >= 3 ? parts[2] : "";
+			
+			switch(sub)
+			{
+				case "enroll" -> raceEnroll(sender);
+				case "info" -> raceInfo(sender);
+				case "start" -> raceStart(sender, rest);
+				case "winner1" -> raceWinner(sender, rest, 1);
+				case "winner2" -> raceWinner(sender, rest, 2);
+				case "winner3" -> raceWinner(sender, rest, 3);
+				case "end" -> raceEnd(sender);
+				default -> replyDM(sender,
+					"Race commands: race enroll | race info | (admins) race start \"Name\" HH:mm dd-M-uuuu | race winner1/2/3 <player> | race end");
+			}
+		}catch(Exception e)
+		{
+			if(debug.isChecked())
+				e.printStackTrace();
+			replyDM(sender, "Race command error.");
+		}
+	}
+	
+	/** Player: enroll into the latest active race. Charges entry fee. */
+	private void raceEnroll(String sender)
+	{
+		try
+		{
+			var res = bank.raceEnroll(sender); // POST /api/races/enroll
+			if(res == null || !res.has("success")
+				|| !res.get("success").getAsBoolean())
+			{
+				replyDM(sender, "Enroll failed: " + safeErr(res));
+				return;
+			}
+			// Fetch balance to echo new balance
+			var detail = bank.getPlayerDetail(sender);
+			Long bal = null;
+			if(detail != null)
+			{
+				if(detail.has("account")
+					&& detail.get("account").isJsonObject())
+				{
+					var acc = detail.getAsJsonObject("account");
+					if(acc.has("balance"))
+						bal = Math.round(acc.get("balance").getAsDouble());
+				}else if(detail.has("balance"))
+				{
+					bal = detail.get("balance").getAsLong();
+				}
+			}
+			double prize = res.has("prize_pool")
+				? res.get("prize_pool").getAsDouble() : -1;
+			double fee =
+				res.has("entry_fee") ? res.get("entry_fee").getAsDouble() : -1;
+			int jockeys = res.has("jockey_count")
+				? res.get("jockey_count").getAsInt() : -1; // if API returns it
+			
+			String msg = "Enrolled! Entry " + money(Math.round(fee))
+				+ ", pot now $"
+				+ NumberFormat.getNumberInstance(Locale.US)
+					.format(Math.round(prize))
+				+ (jockeys >= 0 ? (", participants " + jockeys) : "")
+				+ (bal != null ? (". New bank bal " + money(bal) + ".") : ".");
+			replyDM(sender, msg);
+		}catch(Exception e)
+		{
+			if(debug.isChecked())
+				e.printStackTrace();
+			replyDM(sender, "Enroll error. Try again.");
+		}
+	}
+	
+	/** Player: quick info about latest race. */
+	private void raceInfo(String sender)
+	{
+		try
+		{
+			var info = bank.racesInfo(); // GET /api/races/info
+			if(info == null || info.has("error") || !info.has("race_id"))
+			{
+				replyDM(sender, "No race info available.");
+				return;
+			}
+			
+			double prize = info.has("prize_pool")
+				? info.get("prize_pool").getAsDouble() : 0d;
+			int count = info.has("jockey_count")
+				? info.get("jockey_count").getAsInt() : 0;
+			
+			String startsAt =
+				(info.has("starts_at") && !info.get("starts_at").isJsonNull())
+					? info.get("starts_at").getAsString() : null;
+			
+			String when = "(unscheduled)";
+			if(startsAt != null && !startsAt.isBlank())
+			{
+				java.time.ZonedDateTime zdt;
+				
+				// If it already has 'Z' or an offset like +05:00, parse as
+				// OffsetDateTime.
+				if(startsAt.endsWith("Z")
+					|| startsAt.matches(".*[+-]\\d\\d:\\d\\d$"))
+				{
+					zdt = java.time.OffsetDateTime.parse(startsAt)
+						.atZoneSameInstant(Z_PK);
+				}else
+				{
+					// No offset in string → assume UTC (change to your server
+					// TZ if needed)
+					java.time.LocalDateTime ldt =
+						java.time.LocalDateTime.parse(startsAt);
+					zdt = ldt.atZone(java.time.ZoneOffset.UTC)
+						.withZoneSameInstant(Z_PK);
+				}
+				
+				when = zdt.format(java.time.format.DateTimeFormatter
+					.ofPattern("EEE dd-MMM yyyy HH:mm 'PKT'"));
+			}
+			
+			replyDM(sender, "Race: pot $"
+				+ java.text.NumberFormat.getNumberInstance(java.util.Locale.US)
+					.format(Math.round(prize))
+				+ ", starts " + when + ", participants " + count + ".");
+		}catch(Exception e)
+		{
+			if(debug.isChecked())
+				e.printStackTrace();
+			replyDM(sender, "Race info error.");
+		}
+	}
+	
+	/** Admin: start "Name Here" HH:mm dd-M-uuuu in Asia/Karachi */
+	private void raceStart(String sender, String rest)
+	{
+		if(!isAdmin(sender))
+		{
+			replyDM(sender, "Only admins can start races.");
+			return;
+		}
+		// Expect: "name in quotes" + space + time + space + date (e.g., 17:00
+		// 11-9-2025)
+		try
+		{
+			String name = parseQuotedName(rest);
+			if(name == null)
+			{
+				replyDM(sender,
+					"Usage: race start \"Name Here\" HH:mm dd-M-uuuu");
+				return;
+			}
+			
+			String tail = rest
+				.substring(rest.indexOf('"', rest.indexOf('"') + 1) + 1).trim();
+			String[] tparts = tail.split("\\s+");
+			if(tparts.length < 2)
+			{
+				replyDM(sender,
+					"Usage: race start \"Name Here\" HH:mm dd-M-uuuu");
+				return;
+			}
+			
+			String hhmm = tparts[0]; // 17:00
+			String dmy = tparts[1]; // 11-9-2025
+			var time = java.time.LocalTime.parse(hhmm,
+				java.time.format.DateTimeFormatter.ofPattern("H:mm"));
+			var date = java.time.LocalDate.parse(dmy,
+				java.time.format.DateTimeFormatter.ofPattern("d-M-uuuu"));
+			
+			var zoned = java.time.ZonedDateTime.of(date, time, Z_PK);
+			String isoUtc = zoned.toInstant().toString(); // API wants UTC ISO
+			
+			var res = bank.racesNew(name, isoUtc); // POST /api/races/new
+			if(res == null || !res.has("success")
+				|| !res.get("success").getAsBoolean())
+			{
+				replyDM(sender, "Race start failed: " + safeErr(res));
+				return;
+			}
+			replyDM(sender,
+				"Race created: \"" + name + "\" at "
+					+ zoned.format(java.time.format.DateTimeFormatter
+						.ofPattern("EEE dd-MMM yyyy HH:mm 'PKT'"))
+					+ ".");
+		}catch(Exception e)
+		{
+			if(debug.isChecked())
+				e.printStackTrace();
+			replyDM(sender,
+				"Start error. Format: race start \"Name\" HH:mm dd-M-uuuu");
+		}
+	}
+	
+	/** Admin: set winners */
+	private void raceWinner(String sender, String rest, int n)
+	{
+		if(!isAdmin(sender))
+		{
+			replyDM(sender, "Only admins can set winners.");
+			return;
+		}
+		String player = (rest == null ? "" : rest.trim());
+		if(player.isEmpty())
+		{
+			replyDM(sender, "Usage: race winner" + n + " <playerName>");
+			return;
+		}
+		try
+		{
+			var res = switch(n)
+			{
+				case 1 -> bank.raceWinner(1, player);
+				case 2 -> bank.raceWinner(2, player);
+				default -> bank.raceWinner(3, player);
+			};
+			if(res == null || !res.has("success")
+				|| !res.get("success").getAsBoolean())
+			{
+				replyDM(sender, "Set winner" + n + " failed: " + safeErr(res));
+				return;
+			}
+			double prize =
+				res.has("prize") ? res.get("prize").getAsDouble() : -1;
+			replyDM(sender, "Winner" + n + " set: " + player + " (+"
+				+ money(Math.round(prize)) + ").");
+		}catch(Exception e)
+		{
+			if(debug.isChecked())
+				e.printStackTrace();
+			replyDM(sender, "Winner" + n + " error.");
+		}
+	}
+	
+	/** Admin: end current race */
+	private void raceEnd(String sender)
+	{
+		if(!isAdmin(sender))
+		{
+			replyDM(sender, "Only admins can end races.");
+			return;
+		}
+		try
+		{
+			var res = bank.raceEnd();
+			if(res == null || !res.has("success")
+				|| !res.get("success").getAsBoolean())
+			{
+				replyDM(sender, "End race failed: " + safeErr(res));
+				return;
+			}
+			replyDM(sender, "Race ended.");
+		}catch(Exception e)
+		{
+			if(debug.isChecked())
+				e.printStackTrace();
+			replyDM(sender, "End race error.");
+		}
+	}
+	
+	private String parseQuotedName(String s)
+	{
+		if(s == null)
+			return null;
+		int q1 = s.indexOf('"');
+		if(q1 < 0)
+			return null;
+		int q2 = s.indexOf('"', q1 + 1);
+		if(q2 < 0)
+			return null;
+		return s.substring(q1 + 1, q2);
+	}
+	
+	private String safeErr(com.google.gson.JsonObject res)
+	{
+		try
+		{
+			if(res == null)
+				return "unknown";
+			if(res.has("error"))
+				return res.get("error").getAsString();
+			if(res.has("message"))
+				return res.get("message").getAsString();
+			return "unknown";
+		}catch(Exception e)
+		{
+			return "unknown";
 		}
 	}
 	
@@ -441,24 +771,28 @@ public final class BankManagerHack extends Hack
 			// --- ALL branch first ---
 			if(amountArg != null && amountArg.equalsIgnoreCase("all"))
 			{
+				// Basic wallet check
 				if(checkOwnBalanceBeforePay.isChecked())
 				{
 					Long wallet = ensureFreshOwnBalance(2000);
 					if(wallet == null || wallet <= 0)
 					{
 						replyDM(sender,
-							"Could not verify funds. Please try again in a moment.");
+							"Could not verify my wallet. Try again in a moment.");
 						return;
 					}
 				}
+				
 				var res = bank.withdrawAllR(sender,
 					(long)defaultFeePct.getValue(), "user request: all");
+				
 				if(res == null || !res.has("ok")
 					|| !res.get("ok").getAsBoolean())
 				{
 					replyDM(sender, "Withdraw-all failed.");
 					return;
 				}
+				
 				long txnId =
 					res.has("txn_id") ? res.get("txn_id").getAsLong() : -1L;
 				var rc = res.getAsJsonObject("receipt");
@@ -469,10 +803,12 @@ public final class BankManagerHack extends Hack
 				long after = Math.round(rc.get("balance_after").getAsDouble());
 				
 				enqueuePay(sender, paid);
+				
 				replyDM(sender,
 					"Withdraw-all #" + txnId + ": paid " + money(paid)
 						+ ", fee " + money(fee) + ". (bal " + money(before)
 						+ " → " + money(after) + ").");
+				
 				return;
 			}
 			
@@ -508,6 +844,17 @@ public final class BankManagerHack extends Hack
 				}
 			}
 			
+			if(checkOwnBalanceBeforePay.isChecked())
+			{
+				if(!ensureWalletAtLeast(
+					amt /* or paid from previous calc if known */, 2500))
+				{
+					replyDM(sender,
+						"Hold on—insufficient funds in my wallet right now. Try again in ~10s.");
+					return;
+				}
+			}
+			
 			var res = bank.payoutR(sender, amt, feePct, "user request");
 			if(res == null || !res.has("ok") || !res.get("ok").getAsBoolean())
 			{
@@ -539,6 +886,17 @@ public final class BankManagerHack extends Hack
 	}
 	
 	// ----------------- Chat helpers -----------------
+	private boolean ensureWalletAtLeast(long needed, long timeoutMs)
+	{
+		Long w = ensureFreshOwnBalance(timeoutMs);
+		if(w == null)
+		{
+			// try one more forced refresh
+			requestOwnBalance();
+			w = ensureFreshOwnBalance(timeoutMs);
+		}
+		return w != null && w >= needed;
+	}
 	
 	private Long parseWalletBalance(String s)
 	{
@@ -712,6 +1070,22 @@ public final class BankManagerHack extends Hack
 			sender = s;
 			amount = a;
 		}
+	}
+	
+	private boolean isAdmin(String ign)
+	{
+		if(ign == null)
+			return false;
+		String csv = adminUsersCsv.getValue();
+		if(csv == null || csv.isBlank())
+			return false;
+		String me = ign.trim().toLowerCase(Locale.ROOT);
+		for(String s : csv.split(","))
+		{
+			if(me.equals(s.trim().toLowerCase(Locale.ROOT)))
+				return true;
+		}
+		return false;
 	}
 	
 	private boolean isServerEconomyDeposit(String clean)

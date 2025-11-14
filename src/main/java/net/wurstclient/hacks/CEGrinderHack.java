@@ -1,0 +1,858 @@
+/*
+ * Copyright (c) 2014-2025 Wurst-Imperium and contributors.
+ *
+ * This source code is subject to the terms of the GNU General Public
+ * License, version 3. If a copy of the GPL was not distributed with this
+ * file, You can obtain one at: https://www.gnu.org/licenses/gpl-3.0.txt
+ */
+package net.wurstclient.hacks;
+
+import java.util.*;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.stream.Collectors;
+
+import net.minecraft.block.entity.BarrelBlockEntity;
+import net.minecraft.block.entity.BlockEntity;
+import net.minecraft.block.entity.ChestBlockEntity;
+import net.minecraft.client.gui.screen.ingame.HandledScreen;
+import net.minecraft.client.network.ClientPlayerEntity;
+import net.minecraft.item.Item;
+import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
+import net.minecraft.screen.ScreenHandler;
+import net.minecraft.screen.slot.SlotActionType;
+import net.minecraft.text.Text;
+import net.minecraft.util.Hand;
+import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.Vec3d;
+
+import net.wurstclient.Category;
+import net.wurstclient.SearchTags;
+import net.wurstclient.events.UpdateListener;
+import net.wurstclient.hack.Hack;
+import net.wurstclient.settings.CheckboxSetting;
+import net.wurstclient.settings.SliderSetting;
+import net.wurstclient.settings.TextFieldSetting;
+import net.wurstclient.settings.SliderSetting.ValueDisplay;
+
+@SearchTags({"CE", "custom enchants", "auto ce", "grind", "books", "stash"})
+public final class CEGrinderHack extends Hack implements UpdateListener
+{
+	// ===== Settings =====
+	private final TextFieldSetting ceCommand =
+		new TextFieldSetting("Open command", "/ce");
+	
+	// Tier checkboxes (choose what to buy)
+	private final CheckboxSetting tierSimple =
+		new CheckboxSetting("Simple (white)", false);
+	private final CheckboxSetting tierUnique =
+		new CheckboxSetting("Unique (green)", true);
+	private final CheckboxSetting tierElite =
+		new CheckboxSetting("Elite (blue)", false);
+	private final CheckboxSetting tierUltimate =
+		new CheckboxSetting("Ultimate (yellow)", true);
+	private final CheckboxSetting tierLegendary =
+		new CheckboxSetting("Legendary (orange)", true);
+	private final CheckboxSetting tierFabled =
+		new CheckboxSetting("Fabled (purple)", true);
+	
+	// Keep/trash rules
+	private final TextFieldSetting keepListCsv = new TextFieldSetting(
+		"Keep list (comma-separated)",
+		"hardened,immortal,overload,gears,wither,spirits,guardians,arrow deflect,obsidian shield,armored");
+	
+	// Orbs purchase + pacing
+	private final SliderSetting batchOrbs = new SliderSetting(
+		"Batch orbs per tier", 64, 1, 64, 1, ValueDisplay.INTEGER);
+	private final SliderSetting guiWaitTicks = new SliderSetting(
+		"GUI wait (ticks)", 10, 2, 40, 1, ValueDisplay.INTEGER);
+	
+	// Inventory/nearby containers
+	private final SliderSetting stashRadius =
+		new SliderSetting("Search radius for Barrel/Chest (blocks)", 5, 1, 12,
+			1, ValueDisplay.INTEGER);
+	
+	private final SliderSetting stashWhenUnkeptAtLeast = new SliderSetting(
+		"Stash when unkept books ≥", 12, 1, 64, 1, ValueDisplay.INTEGER);
+	
+	// ===== State =====
+	private enum State
+	{
+		IDLE,
+		OPEN_CE_MENU,
+		PICK_TIER,
+		CONFIRM_BUY,
+		WAIT_RETURN_FROM_BUY,
+		OPEN_ORBS,
+		STASH_USEFUL_OPEN_BARREL,
+		STASH_USEFUL_MOVE,
+		STASH_TRASH_OPEN_CHEST,
+		STASH_TRASH_MOVE,
+		NEXT_TIER
+	}
+	
+	private State state = State.IDLE;
+	private long waitUntil = 0;
+	private long lastCeOpenTick = 0;
+	private int orbsThisTier = 0;
+	
+	private final List<Tier> grindOrder = new ArrayList<>();
+	private int currentTierIndex = 0;
+	
+	private static final class Tier
+	{
+		final String displayKey; // e.g., "Unique"
+		final String orbKey; // e.g., "Unique Enchantment Book"
+		
+		Tier(String d, String o)
+		{
+			displayKey = d;
+			orbKey = o;
+		}
+	}
+	
+	public CEGrinderHack()
+	{
+		super("CEGrinder");
+		setCategory(Category.OTHER);
+		
+		addSetting(ceCommand);
+		addSetting(tierSimple);
+		addSetting(tierUnique);
+		addSetting(tierElite);
+		addSetting(tierUltimate);
+		addSetting(tierLegendary);
+		addSetting(tierFabled);
+		
+		addSetting(keepListCsv);
+		addSetting(batchOrbs);
+		addSetting(guiWaitTicks);
+		addSetting(stashRadius);
+		addSetting(stashWhenUnkeptAtLeast);
+	}
+	
+	@Override
+	protected void onEnable()
+	{
+		if(MC.player == null)
+		{
+			setEnabled(false);
+			return;
+		}
+		buildGrindOrder();
+		currentTierIndex = 0;
+		orbsThisTier = 0;
+		state = grindOrder.isEmpty() ? State.IDLE : State.OPEN_CE_MENU;
+		waitFor(guiWaitTicks.getValueI());
+		EVENTS.add(UpdateListener.class, this);
+	}
+	
+	@Override
+	protected void onDisable()
+	{
+		EVENTS.remove(UpdateListener.class, this);
+		state = State.IDLE;
+	}
+	
+	@Override
+	public void onUpdate()
+	{
+		MC.inGameHud.getChatHud().addMessage(Text.of("[CE] state=" + state));
+		if(MC.player == null || MC.world == null)
+		{
+			setEnabled(false);
+			return;
+		}
+		if(MC.world.getTime() < waitUntil)
+			return;
+		
+		switch(state)
+		{
+			case IDLE -> setEnabled(false);
+			
+			case OPEN_CE_MENU ->
+			{
+				long now = MC.world.getTime();
+				if(now - lastCeOpenTick < guiWaitTicks.getValueI() * 2L)
+					break;
+				sendChat(ceCommand.getValue());
+				lastCeOpenTick = now;
+				waitFor(guiWaitTicks.getValueI());
+				state = State.PICK_TIER;
+			}
+			
+			case PICK_TIER ->
+			{
+				Tier t = currentTier();
+				if(t == null)
+				{
+					state = State.IDLE;
+					break;
+				}
+				// Try by name; fallback to common pane types
+				if(clickSlotByNameContains(t.displayKey) || clickFirstOfTypes(
+					Items.WHITE_STAINED_GLASS_PANE,
+					Items.LIME_STAINED_GLASS_PANE,
+					Items.GREEN_STAINED_GLASS_PANE,
+					Items.CYAN_STAINED_GLASS_PANE,
+					Items.LIGHT_BLUE_STAINED_GLASS_PANE, Items.ENCHANTED_BOOK))
+				{
+					waitFor(guiWaitTicks.getValueI());
+					state = State.CONFIRM_BUY;
+				}else
+				{
+					state = State.OPEN_CE_MENU;
+				}
+			}
+			
+			case CONFIRM_BUY ->
+			{
+				if(clickFirstGreenPaneOrByName("Confirm"))
+				{
+					waitFor(guiWaitTicks.getValueI());
+					state = State.WAIT_RETURN_FROM_BUY;
+				}else
+				{
+					state = State.OPEN_CE_MENU;
+				}
+			}
+			
+			case WAIT_RETURN_FROM_BUY ->
+			{
+				if(countFreeSlots() <= 2
+					|| countUnkeptBooksInInv() >= stashWhenUnkeptAtLeast
+						.getValueI())
+				{
+					state = State.OPEN_ORBS; // go open what we have first
+					waitFor(guiWaitTicks.getValueI());
+					break;
+				}
+				Tier t = currentTier();
+				if(t == null)
+				{
+					state = State.IDLE;
+					break;
+				}
+				orbsThisTier = countOrbsInInv(t.orbKey);
+				if(orbsThisTier >= batchOrbs.getValueI())
+					state = State.OPEN_ORBS;
+				else
+					state = State.PICK_TIER;
+				waitFor(guiWaitTicks.getValueI());
+			}
+			
+			case OPEN_ORBS ->
+			{
+				if(isInventoryFull()
+					|| countUnkeptBooksInInv() >= stashWhenUnkeptAtLeast
+						.getValueI())
+				{
+					state = State.STASH_USEFUL_OPEN_BARREL;
+					waitFor(guiWaitTicks.getValueI());
+					break;
+				}
+				Tier t = currentTier();
+				if(t == null)
+				{
+					state = State.IDLE;
+					break;
+				}
+				
+				// Close any GUI before using
+				if(MC.currentScreen instanceof HandledScreen<?>)
+				{
+					MC.player.closeHandledScreen();
+					waitFor(5);
+					break;
+				}
+				
+				boolean opened = openOneOrbFromInv(t.orbKey);
+				if(opened)
+				{
+					waitFor(4 + randBetween(0, 3));
+					break;
+				}
+				if(countOrbsInInv(t.orbKey) > 0)
+				{
+					waitFor(2);
+					break;
+				}
+				
+				// no orbs left -> stash then next tier
+				state = State.STASH_USEFUL_OPEN_BARREL;
+				waitFor(guiWaitTicks.getValueI());
+			}
+			
+			// ==== NEW: local sorting, no tinkerer ====
+			
+			case STASH_USEFUL_OPEN_BARREL ->
+			{
+				if(openNearestBarrel(stashRadius.getValueI()))
+				{
+					waitFor(guiWaitTicks.getValueI());
+					state = State.STASH_USEFUL_MOVE;
+				}else
+				{
+					// If no barrel found, skip to trash chest phase anyway
+					state = State.STASH_TRASH_OPEN_CHEST;
+				}
+			}
+			
+			case STASH_USEFUL_MOVE ->
+			{
+				int moved =
+					stashFromPlayerInvToOpenContainer(this::isUsefulBookOrDust);
+				waitFor(guiWaitTicks.getValueI());
+				closeIfScreen();
+				state = State.STASH_TRASH_OPEN_CHEST;
+			}
+			
+			case STASH_TRASH_OPEN_CHEST ->
+			{
+				if(openNearestChest(stashRadius.getValueI()))
+				{
+					waitFor(guiWaitTicks.getValueI());
+					state = State.STASH_TRASH_MOVE;
+				}else
+				{
+					state = State.NEXT_TIER;
+				}
+			}
+			
+			case STASH_TRASH_MOVE ->
+			{
+				int moved =
+					stashFromPlayerInvToOpenContainer(this::isTrashCEBook);
+				waitFor(guiWaitTicks.getValueI());
+				closeIfScreen();
+				state = State.NEXT_TIER;
+			}
+			
+			case NEXT_TIER ->
+			{
+				currentTierIndex =
+					(currentTierIndex + 1) % Math.max(1, grindOrder.size());
+				orbsThisTier = 0;
+				if(grindOrder.isEmpty())
+				{
+					state = State.IDLE;
+					setEnabled(false);
+				}else
+				{
+					state = State.OPEN_CE_MENU;
+					waitFor(guiWaitTicks.getValueI());
+				}
+			}
+		}
+	}
+	
+	// ===== Core helpers =====
+	
+	private boolean clickFirstOfTypes(Item... types)
+	{
+		if(!(MC.currentScreen instanceof HandledScreen<?> screen))
+			return false;
+		clearCursorIfAny(screen);
+		ScreenHandler h = screen.getScreenHandler();
+		
+		int best = -1, bestX = Integer.MAX_VALUE, bestY = Integer.MAX_VALUE;
+		outer: for(int i = 0; i < h.slots.size(); i++)
+		{
+			ItemStack st = h.getSlot(i).getStack();
+			if(st.isEmpty())
+				continue;
+			for(Item t : types)
+			{
+				if(st.isOf(t))
+				{
+					var s = h.getSlot(i);
+					if(s.x < bestX || (s.x == bestX && s.y < bestY))
+					{
+						bestX = s.x;
+						bestY = s.y;
+						best = i;
+					}
+					continue outer;
+				}
+			}
+		}
+		if(best == -1)
+			return false;
+		MC.interactionManager.clickSlot(h.syncId, best, 0,
+			SlotActionType.PICKUP, MC.player);
+		return true;
+	}
+	
+	// NEW: make sure we are not holding a book before opening containers
+	// NEW: make sure we are not holding a book before opening containers
+	private void ensureNonBookInHand()
+	{
+		if(MC.player == null)
+			return;
+		
+		ItemStack hand = MC.player.getMainHandStack();
+		// Already holding something that's not a book -> fine
+		if(!hand.isEmpty() && hand.getItem() != Items.ENCHANTED_BOOK)
+			return;
+		
+		// 1) Prefer swords/axes if possible
+		java.util.function.Predicate<ItemStack> isWeaponOrTool = s -> {
+			if(s == null || s.isEmpty())
+				return false;
+			Item it = s.getItem();
+			return it == Items.DIAMOND_SWORD || it == Items.NETHERITE_SWORD
+				|| it == Items.IRON_SWORD || it == Items.STONE_SWORD
+				|| it == Items.DIAMOND_AXE || it == Items.NETHERITE_AXE
+				|| it == Items.IRON_AXE;
+		};
+		
+		// 2) Fallback: any non-book item
+		java.util.function.Predicate<ItemStack> isNonBook = s -> {
+			if(s == null || s.isEmpty())
+				return false;
+			return s.getItem() != Items.ENCHANTED_BOOK;
+		};
+		
+		try
+		{
+			// Try to select a weapon/tool in hotbar+inv
+			boolean switched = net.wurstclient.util.InventoryUtils
+				.selectItem(isWeaponOrTool, 36, true);
+			
+			if(!switched)
+			{
+				// Fallback: any non-book item
+				net.wurstclient.util.InventoryUtils.selectItem(isNonBook, 36,
+					true);
+			}
+		}catch(Throwable ignored)
+		{
+			// if InventoryUtils fails for some reason, we just keep current
+			// hand
+		}
+	}
+	
+	private boolean openNearestBarrel(int radius)
+	{
+		BlockPos bp =
+			findNearest(be -> be instanceof BarrelBlockEntity, radius);
+		if(bp == null)
+			return false;
+		
+		ensureNonBookInHand();
+		
+		Vec3d hit = Vec3d.ofCenter(bp);
+		MC.interactionManager.interactBlock(MC.player, Hand.MAIN_HAND,
+			new BlockHitResult(hit, Direction.UP, bp, false));
+		return true;
+	}
+	
+	private boolean openNearestChest(int radius)
+	{
+		BlockPos bp = findNearest(be -> be instanceof ChestBlockEntity, radius);
+		if(bp == null)
+			return false;
+		
+		ensureNonBookInHand();
+		
+		Vec3d hit = Vec3d.ofCenter(bp);
+		MC.interactionManager.interactBlock(MC.player, Hand.MAIN_HAND,
+			new BlockHitResult(hit, Direction.UP, bp, false));
+		return true;
+	}
+	
+	private BlockPos findNearest(java.util.function.Predicate<BlockEntity> pred,
+		int radius)
+	{
+		BlockPos me = MC.player.getBlockPos();
+		BlockPos best = null;
+		double bestD2 = Double.MAX_VALUE;
+		int r = Math.max(1, radius);
+		for(int dx = -r; dx <= r; dx++)
+			for(int dy = -1; dy <= 1; dy++)
+				for(int dz = -r; dz <= r; dz++)
+				{
+					BlockPos p = me.add(dx, dy, dz);
+					BlockEntity be = MC.world.getBlockEntity(p);
+					if(be != null && pred.test(be))
+					{
+						double d2 = p.getSquaredDistance(me);
+						if(d2 < bestD2)
+						{
+							bestD2 = d2;
+							best = p;
+						}
+					}
+				}
+		return best;
+	}
+	
+	private int stashFromPlayerInvToOpenContainer(
+		java.util.function.Predicate<ItemStack> select)
+	{
+		if(!(MC.currentScreen instanceof HandledScreen<?> screen))
+			return 0;
+		ScreenHandler h = screen.getScreenHandler();
+		int moved = 0;
+		int total = h.slots.size();
+		int start = Math.max(0, total - 36); // player inv region
+		for(int i = start; i < total; i++)
+		{
+			ItemStack st = h.getSlot(i).getStack();
+			if(!st.isEmpty() && select.test(st))
+			{
+				MC.interactionManager.clickSlot(h.syncId, i, 1,
+					SlotActionType.QUICK_MOVE, MC.player);
+				moved++;
+			}
+		}
+		return moved;
+	}
+	
+	// ===== Inventory / books =====
+	
+	private int countOrbsInInv(String orbNameKey)
+	{
+		if(orbNameKey == null || orbNameKey.isEmpty())
+			return 0;
+		
+		String key = orbNameKey.toLowerCase(Locale.ROOT);
+		int c = 0;
+		var inv = MC.player.getInventory();
+		
+		for(int i = 0; i < inv.size(); i++)
+		{
+			ItemStack st = inv.getStack(i);
+			if(st.isEmpty())
+				continue;
+			
+			String name = safeName(st).toLowerCase(Locale.ROOT);
+			if(name.contains(key))
+				c += st.getCount();
+		}
+		return c;
+	}
+	
+	// OLD, STABLE orb-opening logic (one orb per call, state machine loops it
+	// -> opens all)
+	private boolean openOneOrbFromInv(String orbNameKey)
+	{
+		final ClientPlayerEntity p = MC.player;
+		if(p == null)
+			return false;
+		
+		// Never use while GUI is open
+		if(MC.currentScreen instanceof HandledScreen<?>)
+		{
+			p.closeHandledScreen();
+			return false;
+		}
+		
+		if(orbNameKey == null || orbNameKey.isEmpty())
+			return false;
+		
+		final String key = orbNameKey.toLowerCase(Locale.ROOT);
+		java.util.function.Predicate<ItemStack> isOrb = s -> {
+			if(s == null || s.isEmpty())
+				return false;
+			return safeName(s).toLowerCase(Locale.ROOT).contains(key);
+		};
+		
+		int beforeCount = p.getMainHandStack().getCount();
+		String beforeName = safeName(p.getMainHandStack());
+		
+		boolean selected = false;
+		try
+		{
+			// search whole inv, allow replacing main hand with orb
+			selected =
+				net.wurstclient.util.InventoryUtils.selectItem(isOrb, 36, true);
+		}catch(Throwable ignored)
+		{}
+		
+		if(!selected)
+			return false;
+		
+		// Try to right-click the orb
+		try
+		{
+			net.wurstclient.WurstClient.IMC.getInteractionManager()
+				.rightClickItem();
+		}catch(Throwable t)
+		{
+			try
+			{
+				MC.interactionManager.interactItem(p, Hand.MAIN_HAND);
+			}catch(Throwable ignored)
+			{}
+		}
+		
+		// wait so server can process orb -> book
+		waitFor(guiWaitTicks.getValueI() + 1 + randBetween(0, 2));
+		
+		ItemStack now = p.getMainHandStack();
+		// if nothing changed, try once more (some plugins need double-use)
+		if(safeName(now).equals(beforeName) && now.getCount() == beforeCount)
+		{
+			try
+			{
+				net.wurstclient.WurstClient.IMC.getInteractionManager()
+					.rightClickItem();
+			}catch(Throwable t)
+			{
+				try
+				{
+					MC.interactionManager.interactItem(p, Hand.MAIN_HAND);
+				}catch(Throwable ignored)
+				{}
+			}
+			waitFor(2);
+		}
+		
+		return true;
+	}
+	
+	// Helper: actually right-click the item in hand and wait a bit
+	private void useOrbInHand(ClientPlayerEntity p)
+	{
+		try
+		{
+			net.wurstclient.WurstClient.IMC.getInteractionManager()
+				.rightClickItem();
+		}catch(Throwable t)
+		{
+			try
+			{
+				MC.interactionManager.interactItem(p, Hand.MAIN_HAND);
+			}catch(Throwable ignored)
+			{}
+		}
+		
+		// Small delay so the server can process the orb -> book conversion
+		waitFor(guiWaitTicks.getValueI() + 1 + randBetween(0, 2));
+	}
+	
+	private boolean isUsefulBookOrDust(ItemStack st)
+	{
+		return isKeeperBook(st) || isSecretDust(st);
+	}
+	
+	private boolean isTrashCEBook(ItemStack st)
+	{
+		if(st.isEmpty() || st.getItem() != Items.ENCHANTED_BOOK)
+			return false;
+		if(isKeeperBook(st))
+			return false;
+		if(isOrbBook(st))
+			return false;
+		return true;
+	}
+	
+	private boolean isOrbBook(ItemStack st)
+	{
+		if(st.isEmpty() || st.getItem() != Items.ENCHANTED_BOOK)
+			return false;
+		String n = safeName(st).toLowerCase(Locale.ROOT);
+		if(n.contains("enchantment book"))
+			return true;
+		if(n.contains("mystery book"))
+			return true;
+		if((n.contains("simple") || n.contains("unique") || n.contains("elite")
+			|| n.contains("ultimate") || n.contains("legendary")
+			|| n.contains("fabled")) && n.contains("book"))
+			return true;
+		return false;
+	}
+	
+	private Set<String> keepKeywordsLower()
+	{
+		return Arrays.stream(keepListCsv.getValue().split(","))
+			.map(s -> s.trim().toLowerCase(Locale.ROOT))
+			.filter(s -> !s.isEmpty()).collect(Collectors.toSet());
+	}
+	
+	private boolean isKeeperBook(ItemStack st)
+	{
+		if(st.isEmpty())
+			return false;
+		String name = safeName(st).toLowerCase(Locale.ROOT);
+		if(!name.contains("book"))
+			return false;
+		for(String k : keepKeywordsLower())
+			if(name.contains(k))
+				return true;
+		return false;
+	}
+	
+	private boolean isSecretDust(ItemStack st)
+	{
+		if(st.isEmpty())
+			return false;
+		String n = safeName(st).toLowerCase(Locale.ROOT);
+		return n.contains("secret dust")
+			|| (st.getItem() == Items.FIRE_CHARGE && n.contains("dust"));
+	}
+	
+	private boolean isInventoryFull()
+	{
+		var inv = MC.player.getInventory();
+		for(int i = 0; i < inv.size(); i++)
+			if(inv.getStack(i).isEmpty())
+				return false;
+		return true;
+	}
+	
+	private int countFreeSlots()
+	{
+		int f = 0;
+		var inv = MC.player.getInventory();
+		for(int i = 0; i < inv.size(); i++)
+			if(inv.getStack(i).isEmpty())
+				f++;
+		return f;
+	}
+	
+	private int countUnkeptBooksInInv()
+	{
+		int c = 0;
+		var inv = MC.player.getInventory();
+		for(int i = 0; i < inv.size(); i++)
+		{
+			ItemStack st = inv.getStack(i);
+			if(!st.isEmpty())
+			{
+				String n = safeName(st).toLowerCase(Locale.ROOT);
+				if(n.contains("book") && !isKeeperBook(st))
+					c += st.getCount();
+			}
+		}
+		return c;
+	}
+	
+	// ===== Small utils =====
+	
+	private void waitFor(int ticks)
+	{
+		if(MC.world != null)
+			waitUntil = MC.world.getTime() + Math.max(1, ticks);
+	}
+	
+	private static int randBetween(int minIncl, int maxIncl)
+	{
+		return ThreadLocalRandom.current().nextInt(minIncl, maxIncl + 1);
+	}
+	
+	private void buildGrindOrder()
+	{
+		grindOrder.clear();
+		if(tierSimple.isChecked())
+			grindOrder.add(new Tier("Simple", "Simple Enchantment Book"));
+		if(tierUnique.isChecked())
+			grindOrder.add(new Tier("Unique", "Unique Enchantment Book"));
+		if(tierElite.isChecked())
+			grindOrder.add(new Tier("Elite", "Elite Enchantment Book"));
+		if(tierUltimate.isChecked())
+			grindOrder.add(new Tier("Ultimate", "Ultimate Enchantment Book"));
+		if(tierLegendary.isChecked())
+			grindOrder.add(new Tier("Legendary", "Legendary Enchantment Book"));
+		if(tierFabled.isChecked())
+			grindOrder.add(new Tier("Fabled", "Fabled Enchantment Book"));
+	}
+	
+	private Tier currentTier()
+	{
+		if(currentTierIndex < 0 || currentTierIndex >= grindOrder.size())
+			return null;
+		return grindOrder.get(currentTierIndex);
+	}
+	
+	private void sendChat(String msg)
+	{
+		if(MC == null)
+			return;
+		var nh = MC.getNetworkHandler();
+		if(nh == null)
+			return;
+		msg = msg.trim();
+		if(msg.startsWith("/"))
+		{
+			try
+			{
+				nh.sendChatCommand(msg.substring(1));
+			}catch(Throwable ignored)
+			{
+				nh.sendChatMessage(msg);
+			}
+		}else
+			nh.sendChatMessage(msg);
+	}
+	
+	private void closeIfScreen()
+	{
+		if(MC.currentScreen instanceof HandledScreen<?>)
+			MC.player.closeHandledScreen();
+	}
+	
+	private boolean clickSlotByNameContains(String needleLower)
+	{
+		needleLower = needleLower.toLowerCase(Locale.ROOT);
+		if(!(MC.currentScreen instanceof HandledScreen<?> screen))
+			return false;
+		ScreenHandler h = screen.getScreenHandler();
+		for(int i = 0; i < h.slots.size(); i++)
+		{
+			ItemStack st = h.getSlot(i).getStack();
+			if(st.isEmpty())
+				continue;
+			String name = safeName(st);
+			if(name.toLowerCase(Locale.ROOT).contains(needleLower))
+			{
+				MC.interactionManager.clickSlot(h.syncId, i, 0,
+					SlotActionType.PICKUP, MC.player);
+				return true;
+			}
+		}
+		return false;
+	}
+	
+	private boolean clickFirstGreenPaneOrByName(String mayContain)
+	{
+		if(!(MC.currentScreen instanceof HandledScreen<?> screen))
+			return false;
+		ScreenHandler h = screen.getScreenHandler();
+		for(int i = 0; i < h.slots.size(); i++)
+		{
+			Item it = h.getSlot(i).getStack().getItem();
+			if(it == Items.LIME_STAINED_GLASS_PANE
+				|| it == Items.GREEN_STAINED_GLASS_PANE)
+			{
+				MC.interactionManager.clickSlot(h.syncId, i, 0,
+					SlotActionType.PICKUP, MC.player);
+				return true;
+			}
+		}
+		if(mayContain != null && !mayContain.isEmpty())
+			return clickSlotByNameContains(mayContain.toLowerCase(Locale.ROOT));
+		return false;
+	}
+	
+	private void clearCursorIfAny(HandledScreen<?> screen)
+	{
+		if(MC.player == null || MC.interactionManager == null)
+			return;
+		if(!screen.getScreenHandler().getCursorStack().isEmpty())
+		{
+			MC.interactionManager.clickSlot(screen.getScreenHandler().syncId,
+				-999, 0, SlotActionType.PICKUP, MC.player);
+		}
+	}
+	
+	private static String safeName(ItemStack st)
+	{
+		Text t = st.getName();
+		String s = (t == null) ? "" : t.getString();
+		return s.replaceAll("§.", "");
+	}
+}
