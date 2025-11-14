@@ -136,6 +136,9 @@ public final class CEGrinderHack extends Hack implements UpdateListener
 	@Override
 	protected void onEnable()
 	{
+		// restore old behaviour
+		super.onEnable();
+		
 		if(MC.player == null)
 		{
 			setEnabled(false);
@@ -159,7 +162,9 @@ public final class CEGrinderHack extends Hack implements UpdateListener
 	@Override
 	public void onUpdate()
 	{
+		// comment this out if it spams too much
 		MC.inGameHud.getChatHud().addMessage(Text.of("[CE] state=" + state));
+		
 		if(MC.player == null || MC.world == null)
 		{
 			setEnabled(false);
@@ -268,6 +273,9 @@ public final class CEGrinderHack extends Hack implements UpdateListener
 					break;
 				}
 				
+				// old orb logic: opens ONE orb, state machine loops until none
+				forceOrbInHand(t.orbKey);
+				
 				boolean opened = openOneOrbFromInv(t.orbKey);
 				if(opened)
 				{
@@ -317,7 +325,13 @@ public final class CEGrinderHack extends Hack implements UpdateListener
 					state = State.STASH_TRASH_MOVE;
 				}else
 				{
-					state = State.NEXT_TIER;
+					// No chest found: if we still have orbs for this tier, keep
+					// opening them
+					Tier t = currentTier();
+					if(t != null && countOrbsInInv(t.orbKey) > 0)
+						state = State.OPEN_ORBS;
+					else
+						state = State.NEXT_TIER;
 				}
 			}
 			
@@ -327,7 +341,14 @@ public final class CEGrinderHack extends Hack implements UpdateListener
 					stashFromPlayerInvToOpenContainer(this::isTrashCEBook);
 				waitFor(guiWaitTicks.getValueI());
 				closeIfScreen();
-				state = State.NEXT_TIER;
+				
+				// After stashing trash, if there are still orbs of this tier,
+				// go back to opening them
+				Tier t = currentTier();
+				if(t != null && countOrbsInInv(t.orbKey) > 0)
+					state = State.OPEN_ORBS;
+				else
+					state = State.NEXT_TIER;
 			}
 			
 			case NEXT_TIER ->
@@ -349,6 +370,47 @@ public final class CEGrinderHack extends Hack implements UpdateListener
 	}
 	
 	// ===== Core helpers =====
+	// Force-select an orb into hand BEFORE opening orbs
+	private void forceOrbInHand(String orbNameKey)
+	{
+		if(MC.player == null)
+			return;
+		
+		String key = orbNameKey.toLowerCase(Locale.ROOT);
+		
+		java.util.function.Predicate<ItemStack> isOrb = s -> {
+			if(s == null || s.isEmpty())
+				return false;
+			return safeName(s).toLowerCase(Locale.ROOT).contains(key);
+		};
+		
+		try
+		{
+			// force replace hand even if holding a sword
+			net.wurstclient.util.InventoryUtils.selectItem(isOrb, 36, true);
+		}catch(Throwable ignored)
+		{}
+	}
+	
+	// Treat anything that looks like an orb (by name) as an orb, regardless of
+	// item type
+	private boolean isOrbLike(ItemStack st)
+	{
+		if(st == null || st.isEmpty())
+			return false;
+		
+		String n = safeName(st).toLowerCase(Locale.ROOT);
+		if(n.contains("enchantment book"))
+			return true;
+		if(n.contains("mystery book"))
+			return true;
+		if((n.contains("simple") || n.contains("unique") || n.contains("elite")
+			|| n.contains("ultimate") || n.contains("legendary")
+			|| n.contains("fabled")) && n.contains("book"))
+			return true;
+		
+		return false;
+	}
 	
 	private boolean clickFirstOfTypes(Item... types)
 	{
@@ -385,21 +447,22 @@ public final class CEGrinderHack extends Hack implements UpdateListener
 		return true;
 	}
 	
-	// NEW: make sure we are not holding a book before opening containers
-	// NEW: make sure we are not holding a book before opening containers
+	// make sure we are not holding a book before opening containers
+	// make sure we are not holding an orb / enchantment book before opening
+	// containers
 	private void ensureNonBookInHand()
 	{
 		if(MC.player == null)
 			return;
 		
 		ItemStack hand = MC.player.getMainHandStack();
-		// Already holding something that's not a book -> fine
-		if(!hand.isEmpty() && hand.getItem() != Items.ENCHANTED_BOOK)
+		// Already holding something safe -> fine
+		if(isGoodContainerItem(hand))
 			return;
 		
-		// 1) Prefer swords/axes if possible
-		java.util.function.Predicate<ItemStack> isWeaponOrTool = s -> {
-			if(s == null || s.isEmpty())
+		// Prefer swords/axes that are also "safe"
+		java.util.function.Predicate<ItemStack> isWeaponOrToolSafe = s -> {
+			if(!isGoodContainerItem(s))
 				return false;
 			Item it = s.getItem();
 			return it == Items.DIAMOND_SWORD || it == Items.NETHERITE_SWORD
@@ -408,30 +471,37 @@ public final class CEGrinderHack extends Hack implements UpdateListener
 				|| it == Items.IRON_AXE;
 		};
 		
-		// 2) Fallback: any non-book item
-		java.util.function.Predicate<ItemStack> isNonBook = s -> {
-			if(s == null || s.isEmpty())
-				return false;
-			return s.getItem() != Items.ENCHANTED_BOOK;
-		};
+		// Fallback: any safe non-orb, non-book item
+		java.util.function.Predicate<ItemStack> isAnySafe =
+			this::isGoodContainerItem;
 		
 		try
 		{
-			// Try to select a weapon/tool in hotbar+inv
 			boolean switched = net.wurstclient.util.InventoryUtils
-				.selectItem(isWeaponOrTool, 36, true);
+				.selectItem(isWeaponOrToolSafe, 36, true);
 			
 			if(!switched)
 			{
-				// Fallback: any non-book item
-				net.wurstclient.util.InventoryUtils.selectItem(isNonBook, 36,
+				net.wurstclient.util.InventoryUtils.selectItem(isAnySafe, 36,
 					true);
 			}
 		}catch(Throwable ignored)
 		{
-			// if InventoryUtils fails for some reason, we just keep current
-			// hand
+			// if InventoryUtils fails, just keep current hand
 		}
+	}
+	
+	// "Safe" item for opening containers = not empty, not enchanted book, not
+	// orb-like
+	private boolean isGoodContainerItem(ItemStack s)
+	{
+		if(s == null || s.isEmpty())
+			return false;
+		if(s.getItem() == Items.ENCHANTED_BOOK)
+			return false;
+		if(isOrbLike(s))
+			return false;
+		return true;
 	}
 	
 	private boolean openNearestBarrel(int radius)
@@ -513,46 +583,37 @@ public final class CEGrinderHack extends Hack implements UpdateListener
 	
 	// ===== Inventory / books =====
 	
+	// EXACTLY the old implementation
 	private int countOrbsInInv(String orbNameKey)
 	{
-		if(orbNameKey == null || orbNameKey.isEmpty())
-			return 0;
-		
-		String key = orbNameKey.toLowerCase(Locale.ROOT);
 		int c = 0;
 		var inv = MC.player.getInventory();
-		
+		String key = orbNameKey.toLowerCase(Locale.ROOT);
 		for(int i = 0; i < inv.size(); i++)
 		{
 			ItemStack st = inv.getStack(i);
-			if(st.isEmpty())
-				continue;
-			
-			String name = safeName(st).toLowerCase(Locale.ROOT);
-			if(name.contains(key))
+			if(!st.isEmpty()
+				&& safeName(st).toLowerCase(Locale.ROOT).contains(key))
 				c += st.getCount();
 		}
 		return c;
 	}
 	
-	// OLD, STABLE orb-opening logic (one orb per call, state machine loops it
-	// -> opens all)
+	// opens one orb (select into hand, right-click), state machine loops -> ALL
 	private boolean openOneOrbFromInv(String orbNameKey)
 	{
 		final ClientPlayerEntity p = MC.player;
 		if(p == null)
 			return false;
 		
-		// Never use while GUI is open
+		// Never operate while a GUI is open
 		if(MC.currentScreen instanceof HandledScreen<?>)
 		{
 			p.closeHandledScreen();
-			return false;
+			return false; // retry next tick
 		}
 		
-		if(orbNameKey == null || orbNameKey.isEmpty())
-			return false;
-		
+		// Predicate that matches any stack whose name contains the orb key
 		final String key = orbNameKey.toLowerCase(Locale.ROOT);
 		java.util.function.Predicate<ItemStack> isOrb = s -> {
 			if(s == null || s.isEmpty())
@@ -560,22 +621,25 @@ public final class CEGrinderHack extends Hack implements UpdateListener
 			return safeName(s).toLowerCase(Locale.ROOT).contains(key);
 		};
 		
+		// Select the orb into hand like AutoMace does
 		int beforeCount = p.getMainHandStack().getCount();
 		String beforeName = safeName(p.getMainHandStack());
 		
 		boolean selected = false;
 		try
 		{
-			// search whole inv, allow replacing main hand with orb
+			// search whole inventory, allow hotbar replace = true
 			selected =
 				net.wurstclient.util.InventoryUtils.selectItem(isOrb, 36, true);
 		}catch(Throwable ignored)
 		{}
 		
 		if(!selected)
-			return false;
+		{
+			return false; // no orb found anywhere
+		}
 		
-		// Try to right-click the orb
+		// Use it (AutoMace style)
 		try
 		{
 			net.wurstclient.WurstClient.IMC.getInteractionManager()
@@ -589,11 +653,12 @@ public final class CEGrinderHack extends Hack implements UpdateListener
 			{}
 		}
 		
-		// wait so server can process orb -> book
+		// Give the server a couple ticks to convert orb -> book
 		waitFor(guiWaitTicks.getValueI() + 1 + randBetween(0, 2));
 		
+		// Heuristic: if still the same item & count, try one more gentle
+		// attempt
 		ItemStack now = p.getMainHandStack();
-		// if nothing changed, try once more (some plugins need double-use)
 		if(safeName(now).equals(beforeName) && now.getCount() == beforeCount)
 		{
 			try
@@ -612,26 +677,6 @@ public final class CEGrinderHack extends Hack implements UpdateListener
 		}
 		
 		return true;
-	}
-	
-	// Helper: actually right-click the item in hand and wait a bit
-	private void useOrbInHand(ClientPlayerEntity p)
-	{
-		try
-		{
-			net.wurstclient.WurstClient.IMC.getInteractionManager()
-				.rightClickItem();
-		}catch(Throwable t)
-		{
-			try
-			{
-				MC.interactionManager.interactItem(p, Hand.MAIN_HAND);
-			}catch(Throwable ignored)
-			{}
-		}
-		
-		// Small delay so the server can process the orb -> book conversion
-		waitFor(guiWaitTicks.getValueI() + 1 + randBetween(0, 2));
 	}
 	
 	private boolean isUsefulBookOrDust(ItemStack st)
@@ -677,12 +722,23 @@ public final class CEGrinderHack extends Hack implements UpdateListener
 	{
 		if(st.isEmpty())
 			return false;
-		String name = safeName(st).toLowerCase(Locale.ROOT);
-		if(!name.contains("book"))
+		
+		// Only treat actual enchanted books as CE books
+		if(st.getItem() != Items.ENCHANTED_BOOK)
 			return false;
+		
+		String name = safeName(st).toLowerCase(Locale.ROOT);
+		
+		// Don't accidentally keep orb / mystery books
+		if(isOrbBook(st))
+			return false;
+		
 		for(String k : keepKeywordsLower())
-			if(name.contains(k))
-				return true;
+		{
+			if(!k.isEmpty() && name.contains(k))
+				return true; // e.g. "wither" matches "wither iv"
+		}
+		
 		return false;
 	}
 	
