@@ -240,7 +240,7 @@ public final class CEGrinderHack extends Hack implements UpdateListener
 						.getValueI())
 				{
 					state = State.OPEN_ORBS;
-					waitFor(3); // small delay before first orb use
+					waitFor(3);
 					break;
 				}
 				
@@ -254,17 +254,16 @@ public final class CEGrinderHack extends Hack implements UpdateListener
 				// How many orbs of this tier do we currently have?
 				orbsThisTier = countOrbsInInv(t.orbKey);
 				
-				// If we have ANY orbs, immediately go to opening them.
-				// Only stay in the buy loop if we still have 0 orbs.
-				if(orbsThisTier > 0)
+				// Buy until we reach the configured batch size
+				if(orbsThisTier >= batchOrbs.getValueI())
 				{
 					state = State.OPEN_ORBS;
 					waitFor(3); // quick hand-off into OPEN_ORBS
 				}else
 				{
-					// Still no orbs – keep buying this tier
+					// Keep buying this tier
 					state = State.PICK_TIER;
-					waitFor(guiWaitTicks.getValueI()); // normal GUI pacing
+					waitFor(guiWaitTicks.getValueI());
 				}
 			}
 			
@@ -290,22 +289,25 @@ public final class CEGrinderHack extends Hack implements UpdateListener
 				if(MC.currentScreen instanceof HandledScreen<?>)
 				{
 					MC.player.closeHandledScreen();
-					waitFor(5);
+					waitFor(2);
 					break;
 				}
 				
-				// opens ONE orb, state machine loops until none
+				// ensure orb is in hand
 				forceOrbInHand(t.orbKey);
 				
 				boolean opened = openOneOrbFromInv(t.orbKey);
 				if(opened)
 				{
-					waitFor(4 + randBetween(0, 3));
+					// openOneOrbFromInv already set a short waitFor, so just
+					// loop
 					break;
 				}
+				
 				if(countOrbsInInv(t.orbKey) > 0)
 				{
-					waitFor(2);
+					// couldn't open this tick, retry very soon
+					waitFor(1);
 					break;
 				}
 				
@@ -640,16 +642,22 @@ public final class CEGrinderHack extends Hack implements UpdateListener
 			return safeName(s).toLowerCase(Locale.ROOT).contains(key);
 		};
 		
-		// Select the orb into hand like AutoMace does
 		int beforeCount = p.getMainHandStack().getCount();
 		String beforeName = safeName(p.getMainHandStack());
 		
 		boolean selected = false;
 		try
 		{
-			// search whole inventory, allow hotbar replace = true
-			selected =
-				net.wurstclient.util.InventoryUtils.selectItem(isOrb, 36, true);
+			// If we're already holding an orb, treat that as "selected"
+			if(isOrb.test(p.getMainHandStack()))
+			{
+				selected = true;
+			}else
+			{
+				// search whole inventory, allow hotbar replace = true
+				selected = net.wurstclient.util.InventoryUtils.selectItem(isOrb,
+					36, true);
+			}
 		}catch(Throwable ignored)
 		{}
 		
@@ -672,11 +680,11 @@ public final class CEGrinderHack extends Hack implements UpdateListener
 			{}
 		}
 		
-		// Give the server a couple ticks to convert orb -> book
-		waitFor(guiWaitTicks.getValueI() + 1 + randBetween(0, 2));
+		// Short delay to let the server convert orb -> book (not tied to
+		// guiWaitTicks)
+		waitFor(2 + randBetween(0, 2));
 		
-		// Heuristic: if still the same item & count, try one more gentle
-		// attempt
+		// If still the same item & count, try one more gentle attempt
 		ItemStack now = p.getMainHandStack();
 		if(safeName(now).equals(beforeName) && now.getCount() == beforeCount)
 		{
