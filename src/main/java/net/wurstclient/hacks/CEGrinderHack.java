@@ -179,11 +179,17 @@ public final class CEGrinderHack extends Hack implements UpdateListener
 			
 			case OPEN_CE_MENU ->
 			{
-				long now = MC.world.getTime();
-				if(now - lastCeOpenTick < guiWaitTicks.getValueI() * 2L)
+				// If any GUI is open, close it first, then try again next tick
+				if(MC.currentScreen instanceof HandledScreen<?>)
+				{
+					MC.player.closeHandledScreen();
+					waitFor(5);
 					break;
+				}
+				
+				// Just fire the /ce command and go to PICK_TIER
 				sendChat(ceCommand.getValue());
-				lastCeOpenTick = now;
+				lastCeOpenTick = MC.world.getTime();
 				waitFor(guiWaitTicks.getValueI());
 				state = State.PICK_TIER;
 			}
@@ -208,6 +214,7 @@ public final class CEGrinderHack extends Hack implements UpdateListener
 					state = State.CONFIRM_BUY;
 				}else
 				{
+					// couldn't find tier icon, try re-opening CE
 					state = State.OPEN_CE_MENU;
 				}
 			}
@@ -226,26 +233,39 @@ public final class CEGrinderHack extends Hack implements UpdateListener
 			
 			case WAIT_RETURN_FROM_BUY ->
 			{
+				// If inventory is tight or many unkept books, stop buying and
+				// start opening
 				if(countFreeSlots() <= 2
 					|| countUnkeptBooksInInv() >= stashWhenUnkeptAtLeast
 						.getValueI())
 				{
-					state = State.OPEN_ORBS; // go open what we have first
-					waitFor(guiWaitTicks.getValueI());
+					state = State.OPEN_ORBS;
+					waitFor(3); // small delay before first orb use
 					break;
 				}
+				
 				Tier t = currentTier();
 				if(t == null)
 				{
 					state = State.IDLE;
 					break;
 				}
+				
+				// How many orbs of this tier do we currently have?
 				orbsThisTier = countOrbsInInv(t.orbKey);
-				if(orbsThisTier >= batchOrbs.getValueI())
+				
+				// If we have ANY orbs, immediately go to opening them.
+				// Only stay in the buy loop if we still have 0 orbs.
+				if(orbsThisTier > 0)
+				{
 					state = State.OPEN_ORBS;
-				else
+					waitFor(3); // quick hand-off into OPEN_ORBS
+				}else
+				{
+					// Still no orbs – keep buying this tier
 					state = State.PICK_TIER;
-				waitFor(guiWaitTicks.getValueI());
+					waitFor(guiWaitTicks.getValueI()); // normal GUI pacing
+				}
 			}
 			
 			case OPEN_ORBS ->
@@ -258,6 +278,7 @@ public final class CEGrinderHack extends Hack implements UpdateListener
 					waitFor(guiWaitTicks.getValueI());
 					break;
 				}
+				
 				Tier t = currentTier();
 				if(t == null)
 				{
@@ -273,7 +294,7 @@ public final class CEGrinderHack extends Hack implements UpdateListener
 					break;
 				}
 				
-				// old orb logic: opens ONE orb, state machine loops until none
+				// opens ONE orb, state machine loops until none
 				forceOrbInHand(t.orbKey);
 				
 				boolean opened = openOneOrbFromInv(t.orbKey);
@@ -292,8 +313,6 @@ public final class CEGrinderHack extends Hack implements UpdateListener
 				state = State.STASH_USEFUL_OPEN_BARREL;
 				waitFor(guiWaitTicks.getValueI());
 			}
-			
-			// ==== NEW: local sorting, no tinkerer ====
 			
 			case STASH_USEFUL_OPEN_BARREL ->
 			{
@@ -751,12 +770,16 @@ public final class CEGrinderHack extends Hack implements UpdateListener
 			|| (st.getItem() == Items.FIRE_CHARGE && n.contains("dust"));
 	}
 	
+	// Only treat main inventory + hotbar as storage (0–35)
 	private boolean isInventoryFull()
 	{
 		var inv = MC.player.getInventory();
-		for(int i = 0; i < inv.size(); i++)
+		int limit = Math.min(inv.size(), 36); // 36 = 27 main + 9 hotbar
+		for(int i = 0; i < limit; i++)
+		{
 			if(inv.getStack(i).isEmpty())
 				return false;
+		}
 		return true;
 	}
 	
@@ -764,9 +787,12 @@ public final class CEGrinderHack extends Hack implements UpdateListener
 	{
 		int f = 0;
 		var inv = MC.player.getInventory();
-		for(int i = 0; i < inv.size(); i++)
+		int limit = Math.min(inv.size(), 36); // ignore armor/offhand
+		for(int i = 0; i < limit; i++)
+		{
 			if(inv.getStack(i).isEmpty())
 				f++;
+		}
 		return f;
 	}
 	
@@ -774,15 +800,24 @@ public final class CEGrinderHack extends Hack implements UpdateListener
 	{
 		int c = 0;
 		var inv = MC.player.getInventory();
+		
 		for(int i = 0; i < inv.size(); i++)
 		{
 			ItemStack st = inv.getStack(i);
-			if(!st.isEmpty())
-			{
-				String n = safeName(st).toLowerCase(Locale.ROOT);
-				if(n.contains("book") && !isKeeperBook(st))
-					c += st.getCount();
-			}
+			if(st.isEmpty())
+				continue;
+			
+			// Only care about actual enchanted books
+			if(st.getItem() != Items.ENCHANTED_BOOK)
+				continue;
+			
+			// Ignore CE orbs / mystery books in this count
+			if(isOrbBook(st))
+				continue;
+			
+			// Only count non-keeper result books as "unkept"
+			if(!isKeeperBook(st))
+				c += st.getCount();
 		}
 		return c;
 	}
