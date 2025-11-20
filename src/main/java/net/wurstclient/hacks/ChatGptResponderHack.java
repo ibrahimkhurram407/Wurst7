@@ -10,7 +10,11 @@ package net.wurstclient.hacks;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.ArrayDeque;
+import java.util.Deque;
 
+import net.minecraft.client.network.ClientPlayNetworkHandler;
+import net.minecraft.client.network.PlayerListEntry;
 import net.minecraft.text.Text;
 import net.wurstclient.Category;
 import net.wurstclient.SearchTags;
@@ -27,22 +31,32 @@ import net.wurstclient.ai.OpenAIClient;
 public final class ChatGptResponderHack extends Hack
 	implements ChatInputListener
 {
-	
 	// =========================
-	// Settings (existing)
+	// Settings
 	// =========================
 	private final TextFieldSetting apiKey =
 		new TextFieldSetting("OpenAI API Key", "");
 	
-	// Editable prompt template
-	// Placeholders: {message}, {sender}, {me}, {is_dm}
+	/*
+	 * Prompt template.
+	 * Placeholders:
+	 * {message} - latest incoming message text
+	 * {sender} - name of the other player (or "Unknown")
+	 * {me} - your Minecraft name
+	 * {player} - same as {me}, convenience alias
+	 * {is_dm} - "true"/"false" depending on DM or public
+	 * {history} - log of recent DMs/mentions & replies
+	 */
 	private final TextFieldSetting promptTemplate = new TextFieldSetting(
 		"Prompt Template",
-		"Reply concisely (max 2 short sentences) to this Minecraft chat from {sender}: {message}");
+		"Conversation so far:\n{history}\n\n"
+			+ "Now reply concisely (max 2 short sentences) to this Minecraft chat Remember you are {player} and you are fishing and you dont want to be disturbed or want to chat, and if someone says u are autofishing, say that you are not, you are fishing to earn money "
+			+ "from {sender} to {player}: {message}");
 	
 	private final CheckboxSetting onlyWhenMentioned = new CheckboxSetting(
 		"Only reply when mentioned",
-		"Reply only if your name is in the incoming chat line (public chat). DMs are always allowed when 'Respond to DMs' is ON.",
+		"Reply only if your name is in the incoming chat line (public chat). "
+			+ "DMs are always allowed when 'Respond to DMs' is ON.",
 		true);
 	
 	private final CheckboxSetting respondToDMs = new CheckboxSetting(
@@ -50,10 +64,11 @@ public final class ChatGptResponderHack extends Hack
 		"Reply even if your name isn't mentioned when it's a private message (DM).",
 		true);
 	
-	private final CheckboxSetting ignoreOwnMessages = new CheckboxSetting(
-		"Ignore my own messages",
-		"Prevents loops if the server echoes your chat. (DMs with pattern like [Sender -> me] will NOT be ignored.)",
-		true);
+	private final CheckboxSetting ignoreOwnMessages =
+		new CheckboxSetting("Ignore my own messages",
+			"Prevents loops if the server echoes your chat. "
+				+ "(DMs with pattern like [Sender -> me] will NOT be ignored.)",
+			true);
 	
 	private final CheckboxSetting testModeEcho =
 		new CheckboxSetting("Test mode (echo instead of API)",
@@ -73,7 +88,7 @@ public final class ChatGptResponderHack extends Hack
 			4000, 50, SliderSetting.ValueDisplay.DECIMAL);
 	
 	// =========================
-	// NEW: Mod disabling settings
+	// Mod disabling settings
 	// =========================
 	private final CheckboxSetting disableMods = new CheckboxSetting(
 		"Disable mods when messaging",
@@ -97,7 +112,11 @@ public final class ChatGptResponderHack extends Hack
 	// last reply timestamps per sender (lowercased)
 	private final Map<String, Long> lastReplyAt = new HashMap<>();
 	
-	// NEW: a ref-counted disabler so overlaps are safe
+	// conversation history (DMs and public mentions)
+	private static final int MAX_HISTORY_LINES = 40;
+	private final Deque<String> history = new ArrayDeque<>();
+	
+	// ref-counted disabler so overlaps are safe
 	private final ModDisabler modDisabler = new ModDisabler();
 	
 	public ChatGptResponderHack()
@@ -114,7 +133,6 @@ public final class ChatGptResponderHack extends Hack
 		addSetting(cooldownMs);
 		addSetting(sendDelayMs);
 		
-		// New section in GUI
 		addSetting(disableMods);
 		addSetting(disableSneak);
 		addSetting(disableTriggerBot);
@@ -216,7 +234,7 @@ public final class ChatGptResponderHack extends Hack
 			String msg = raw.substring(end + 1).trim();
 			return new Parsed(sender, msg, false);
 		}
-		// fallback: public/unknown
+		// fallback: public/unknown (no clear player)
 		return new Parsed(null, raw, false);
 	}
 	
@@ -239,6 +257,16 @@ public final class ChatGptResponderHack extends Hack
 			return;
 		}
 		
+		// we only want to react to *real players* in the playerlist
+		if(parsed.sender != null && !isRealPlayer(parsed.sender))
+		{
+			if(debugLog.isChecked())
+				System.out.println(
+					"[ChatGptResponder] Ignored (sender not a real player): "
+						+ parsed.sender);
+			return;
+		}
+		
 		if(ignoreOwnMessages.isChecked() && !parsed.isDm)
 		{
 			if(raw.contains("<" + me + ">") || raw.startsWith(me + ":"))
@@ -246,11 +274,22 @@ public final class ChatGptResponderHack extends Hack
 		}
 		
 		boolean mentioned = raw.toLowerCase().contains(me.toLowerCase());
+		
+		// only reply to *player* messages in public when we are mentioned
 		if(!parsed.isDm && onlyWhenMentioned.isChecked() && !mentioned)
 			return;
 		
 		if(parsed.isDm && !respondToDMs.isChecked())
 			return;
+		
+		// --- record incoming message for history if DM or mention ---
+		if(parsed.isDm || mentioned)
+		{
+			String senderName =
+				parsed.sender == null ? "Unknown" : parsed.sender;
+			String tag = parsed.isDm ? "DM" : "Public";
+			addHistoryLine("[" + tag + "] " + senderName + ": " + parsed.msg);
+		}
 		
 		// per-sender cooldown
 		String keyForCooldown =
@@ -301,6 +340,9 @@ public final class ChatGptResponderHack extends Hack
 									"[ChatGptResponder] Echo (public).");
 						}
 					}
+					
+					// log our reply as part of history
+					addHistoryLine("[Me] " + reply);
 				}catch(InterruptedException ignored)
 				{}finally
 				{
@@ -322,15 +364,18 @@ public final class ChatGptResponderHack extends Hack
 			return;
 		}
 		
-		final String tpl = (promptTemplate.getValue() == null
-			|| promptTemplate.getValue().isBlank())
-				? "Reply concisely (max 2 short sentences) to this Minecraft chat from {sender}: {message}"
+		final String tpl = (promptTemplate.getValue() == null || promptTemplate
+			.getValue().isBlank()) ? "Conversation so far:\n{history}\n\n"
+				+ "Now reply concisely (max 2 short sentences) to this Minecraft chat from {sender}: {message}"
 				: promptTemplate.getValue();
+		
+		final String historyBlock = buildHistoryBlock();
 		
 		final String prompt = tpl.replace("{message}", textForModel)
 			.replace("{sender}", targetName == null ? "Unknown" : targetName)
-			.replace("{me}", me)
-			.replace("{is_dm}", Boolean.toString(parsed.isDm));
+			.replace("{me}", me).replace("{player}", me)
+			.replace("{is_dm}", Boolean.toString(parsed.isDm))
+			.replace("{history}", historyBlock);
 		
 		Thread.ofVirtual().name("ChatGptResponder")
 			.uncaughtExceptionHandler((t, e) -> e.printStackTrace())
@@ -376,6 +421,9 @@ public final class ChatGptResponderHack extends Hack
 									"[ChatGptResponder] Sent (public).");
 						}
 					}
+					
+					// record our reply in history
+					addHistoryLine("[Me] " + reply);
 				}catch(Exception e)
 				{
 					e.printStackTrace();
@@ -389,6 +437,48 @@ public final class ChatGptResponderHack extends Hack
 	}
 	
 	// ============ Helpers ============
+	
+	private boolean isRealPlayer(String name)
+	{
+		if(name == null || MC.getNetworkHandler() == null)
+			return false;
+		
+		ClientPlayNetworkHandler nh = MC.getNetworkHandler();
+		for(PlayerListEntry e : nh.getPlayerList())
+		{
+			if(e == null || e.getProfile() == null)
+				continue;
+			String n = e.getProfile().getName();
+			if(n != null && n.equalsIgnoreCase(name))
+				return true;
+		}
+		return false;
+	}
+	
+	private void addHistoryLine(String line)
+	{
+		if(line == null || line.isEmpty())
+			return;
+		history.addLast(line);
+		while(history.size() > MAX_HISTORY_LINES)
+			history.removeFirst();
+	}
+	
+	private String buildHistoryBlock()
+	{
+		if(history.isEmpty())
+			return "";
+		
+		StringBuilder sb = new StringBuilder();
+		for(String line : history)
+			sb.append(line).append('\n');
+		
+		// trim a bit so prompt doesn't explode
+		String result = sb.toString().trim();
+		if(result.length() > 2000)
+			result = result.substring(result.length() - 2000);
+		return result;
+	}
 	
 	private static long jitter()
 	{
@@ -410,8 +500,7 @@ public final class ChatGptResponderHack extends Hack
 	
 	/**
 	 * Temporarily disables selected hacks while messaging, with reference
-	 * counting
-	 * so overlapping replies don't re-enable too early.
+	 * counting so overlapping replies don't re-enable too early.
 	 */
 	private final class ModDisabler
 	{
@@ -421,9 +510,7 @@ public final class ChatGptResponderHack extends Hack
 		void acquireAndApply()
 		{
 			if(holds.getAndIncrement() == 0)
-			{
 				apply();
-			}
 		}
 		
 		void releaseLater(long ms)
@@ -441,7 +528,6 @@ public final class ChatGptResponderHack extends Hack
 		
 		private synchronized void apply()
 		{
-			// snapshot & disable only once (first acquire)
 			var hax = WurstClient.INSTANCE.getHax();
 			
 			if(disableSneak.isChecked() && priorSneak == null)
@@ -469,7 +555,6 @@ public final class ChatGptResponderHack extends Hack
 			if(holds.decrementAndGet() > 0)
 				return; // still in use by another reply
 				
-			// restore exactly to previous states
 			var hax = WurstClient.INSTANCE.getHax();
 			
 			if(priorSneak != null)
@@ -497,5 +582,4 @@ public final class ChatGptResponderHack extends Hack
 	{
 		return promptTemplate;
 	}
-	
 }
