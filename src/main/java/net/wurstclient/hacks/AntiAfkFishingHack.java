@@ -36,7 +36,7 @@ public final class AntiAfkFishingHack extends Hack implements UpdateListener
 	
 	private final SliderSetting waitTime =
 		new SliderSetting("Wait time", "Time to wait before changing position.",
-			30, 5, 300, 1, ValueDisplay.DECIMAL.withSuffix("s"));
+			30, 5, 900, 1, ValueDisplay.DECIMAL.withSuffix("s"));
 	private final SliderSetting waitTimeRand = new SliderSetting(
 		"Wait time randomization", "Random variation in wait time.", 5, 0, 60,
 		0.5, ValueDisplay.DECIMAL.withPrefix("\u00b1").withSuffix("s"));

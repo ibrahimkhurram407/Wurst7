@@ -13,6 +13,7 @@ import java.util.Set;
 
 import net.minecraft.client.network.ClientPlayNetworkHandler;
 import net.minecraft.client.network.PlayerListEntry;
+import net.minecraft.entity.player.PlayerEntity;
 import net.wurstclient.Category;
 import net.wurstclient.SearchTags;
 import net.wurstclient.WurstClient;
@@ -25,16 +26,29 @@ import net.wurstclient.settings.TextFieldSetting;
 @SearchTags({"staff", "avoid", "mod detector", "auto leave"})
 public final class AvoidStaffHack extends Hack implements UpdateListener
 {
-	private final TextFieldSetting staffNames = new TextFieldSetting(
-		"Staff names",
-		"Comma-separated list of usernames to watch for.\nExample: Admin,Mod,Helper",
+	// ===== Staff lists =====
+	private final TextFieldSetting onlineStaffNames = new TextFieldSetting(
+		"Online staff names",
+		"Comma-separated list of staff usernames to detect in the TAB / player list.\n"
+			+ "Example: Admin,Mod,Helper",
 		"");
 	
-	private final EnumSetting<ReactionMode> reactionMode =
-		new EnumSetting<>("Reaction", "What to do if a listed staff joins.",
-			ReactionMode.values(), ReactionMode.LEAVE);
+	private final TextFieldSetting nearbyStaffNames = new TextFieldSetting(
+		"Nearby staff names",
+		"Comma-separated list of staff usernames to detect when they are nearby / rendered.\n"
+			+ "Example: Admin,Mod,Helper",
+		"");
 	
-	// Mods to disable (can be extended)
+	// ===== Detection mode =====
+	private final EnumSetting<DetectionMode> detectionMode = new EnumSetting<>(
+		"Detection mode", "Which method(s) to use to detect staff.",
+		DetectionMode.values(), DetectionMode.BOTH);
+	
+	private final EnumSetting<ReactionMode> reactionMode = new EnumSetting<>(
+		"Reaction", "What to do if a listed staff is detected.",
+		ReactionMode.values(), ReactionMode.DISABLE);
+	
+	// ===== Hacks to disable =====
 	private final CheckboxSetting disableSneak =
 		new CheckboxSetting("Disable Sneak hack", true);
 	private final CheckboxSetting disableTriggerBot =
@@ -42,19 +56,62 @@ public final class AvoidStaffHack extends Hack implements UpdateListener
 	private final CheckboxSetting disableKillAura =
 		new CheckboxSetting("Disable KillAuraLegit hack", true);
 	
-	private boolean modsDisabled = false; // track if we disabled mods
-	private boolean prevSneak, prevTriggerBot, prevKillAura;
+	private final CheckboxSetting disableChatGptResponder =
+		new CheckboxSetting("Disable ChatGptResponder hack", true);
+	
+	private final CheckboxSetting disableAntiAfkFishing =
+		new CheckboxSetting("Disable AntiAfkFishing hack", true);
+	
+	private final CheckboxSetting disableAutoFish =
+		new CheckboxSetting("Disable AutoFish hack", true);
+	
+	// ===== State =====
+	private boolean modsDisabled = false;
+	
+	private boolean prevSneak;
+	private boolean prevTriggerBot;
+	private boolean prevKillAura;
+	
+	private boolean prevChatGptResponder;
+	private boolean prevAntiAfkFishing;
+	private boolean prevAutoFish;
 	
 	public AvoidStaffHack()
 	{
 		super("AvoidStaff");
 		setCategory(Category.OTHER);
 		
-		addSetting(staffNames);
+		addSetting(onlineStaffNames);
+		addSetting(nearbyStaffNames);
+		addSetting(detectionMode);
 		addSetting(reactionMode);
+		
 		addSetting(disableSneak);
 		addSetting(disableTriggerBot);
 		addSetting(disableKillAura);
+		addSetting(disableChatGptResponder);
+		addSetting(disableAntiAfkFishing);
+		addSetting(disableAutoFish);
+	}
+	
+	private enum DetectionMode
+	{
+		ONLINE("Online staff only"),
+		NEARBY("Nearby / rendered staff only"),
+		BOTH("Both online & nearby");
+		
+		private final String name;
+		
+		DetectionMode(String n)
+		{
+			name = n;
+		}
+		
+		@Override
+		public String toString()
+		{
+			return name;
+		}
 	}
 	
 	private enum ReactionMode
@@ -87,27 +144,74 @@ public final class AvoidStaffHack extends Hack implements UpdateListener
 	protected void onDisable()
 	{
 		EVENTS.remove(UpdateListener.class, this);
-		// restore hacks if they were disabled by us
 		restoreMods();
 	}
 	
 	@Override
 	public void onUpdate()
 	{
-		if(MC.player == null || MC.getNetworkHandler() == null)
+		if(MC.player == null || MC.world == null
+			|| MC.getNetworkHandler() == null)
 			return;
 		
-		// parse staff names
-		Set<String> watch = new HashSet<>();
-		Arrays.stream(staffNames.getValue().split(",")).map(String::trim)
-			.filter(s -> !s.isEmpty()).forEach(s -> watch.add(s.toLowerCase()));
+		// parse staff lists
+		Set<String> onlineWatch = parseNames(onlineStaffNames.getValue());
+		Set<String> nearbyWatch = parseNames(nearbyStaffNames.getValue());
 		
-		if(watch.isEmpty())
+		if(onlineWatch.isEmpty() && nearbyWatch.isEmpty())
+		{
+			// nothing to watch -> just restore and idle
+			if(modsDisabled)
+				restoreMods();
 			return;
+		}
 		
 		boolean staffFound = false;
+		String detectedName = null;
 		
-		// check player list
+		switch(detectionMode.getSelected())
+		{
+			case ONLINE:
+			detectedName = detectOnlineStaff(onlineWatch);
+			staffFound = detectedName != null;
+			break;
+			
+			case NEARBY:
+			detectedName = detectNearbyStaff(nearbyWatch);
+			staffFound = detectedName != null;
+			break;
+			
+			case BOTH:
+			detectedName = detectOnlineStaff(onlineWatch);
+			if(detectedName == null)
+				detectedName = detectNearbyStaff(nearbyWatch);
+			staffFound = detectedName != null;
+			break;
+		}
+		
+		if(staffFound)
+			react(detectedName);
+		else if(modsDisabled)
+			restoreMods();
+	}
+	
+	// =========================================================
+	// Detection helpers
+	// =========================================================
+	
+	private Set<String> parseNames(String csv)
+	{
+		Set<String> set = new HashSet<>();
+		Arrays.stream(csv.split(",")).map(String::trim)
+			.filter(s -> !s.isEmpty()).forEach(s -> set.add(s.toLowerCase()));
+		return set;
+	}
+	
+	private String detectOnlineStaff(Set<String> watch)
+	{
+		if(watch.isEmpty())
+			return null;
+		
 		ClientPlayNetworkHandler nh = MC.getNetworkHandler();
 		for(PlayerListEntry entry : nh.getPlayerList())
 		{
@@ -118,19 +222,34 @@ public final class AvoidStaffHack extends Hack implements UpdateListener
 				continue;
 			
 			if(watch.contains(name.toLowerCase()))
-			{
-				staffFound = true;
-				react(name);
-				break;
-			}
+				return name;
 		}
-		
-		// If staff left → restore hacks
-		if(!staffFound && modsDisabled)
-		{
-			restoreMods();
-		}
+		return null;
 	}
+	
+	private String detectNearbyStaff(Set<String> watch)
+	{
+		if(watch.isEmpty())
+			return null;
+		
+		for(PlayerEntity player : MC.world.getPlayers())
+		{
+			if(player == null || player == MC.player)
+				continue;
+			
+			String name = player.getGameProfile().getName();
+			if(name == null)
+				continue;
+			
+			if(watch.contains(name.toLowerCase()))
+				return name;
+		}
+		return null;
+	}
+	
+	// =========================================================
+	// Reaction & mod toggling
+	// =========================================================
 	
 	private void react(String staffName)
 	{
@@ -146,31 +265,53 @@ public final class AvoidStaffHack extends Hack implements UpdateListener
 			break;
 			
 			case DISABLE:
-			if(!modsDisabled) // only disable once
-			{
-				var hax = WurstClient.INSTANCE.getHax();
-				
-				prevSneak = hax.sneakHack.isEnabled();
-				prevTriggerBot = hax.triggerBotHack.isEnabled();
-				prevKillAura = hax.killauraLegitHack.isEnabled();
-				
-				if(disableSneak.isChecked())
-					hax.sneakHack.setEnabled(false);
-				if(disableTriggerBot.isChecked())
-					hax.triggerBotHack.setEnabled(false);
-				if(disableKillAura.isChecked())
-					hax.killauraLegitHack.setEnabled(false);
-				
-				modsDisabled = true;
-			}
+			if(!modsDisabled)
+				disableMods();
 			break;
 		}
+	}
+	
+	private void disableMods()
+	{
+		var hax = WurstClient.INSTANCE.getHax();
+		
+		// snapshot current states
+		prevSneak = hax.sneakHack.isEnabled();
+		prevTriggerBot = hax.triggerBotHack.isEnabled();
+		prevKillAura = hax.killauraLegitHack.isEnabled();
+		
+		prevChatGptResponder = hax.chatGptResponderHack != null
+			&& hax.chatGptResponderHack.isEnabled();
+		prevAntiAfkFishing = hax.AntiAfkFishingHack != null
+			&& hax.AntiAfkFishingHack.isEnabled();
+		prevAutoFish = hax.autoFishHack != null && hax.autoFishHack.isEnabled();
+		
+		// apply disables according to settings
+		if(disableSneak.isChecked())
+			hax.sneakHack.setEnabled(false);
+		if(disableTriggerBot.isChecked())
+			hax.triggerBotHack.setEnabled(false);
+		if(disableKillAura.isChecked())
+			hax.killauraLegitHack.setEnabled(false);
+		
+		if(disableChatGptResponder.isChecked()
+			&& hax.chatGptResponderHack != null)
+			hax.chatGptResponderHack.setEnabled(false);
+		
+		if(disableAntiAfkFishing.isChecked() && hax.AntiAfkFishingHack != null)
+			hax.AntiAfkFishingHack.setEnabled(false);
+		
+		if(disableAutoFish.isChecked() && hax.autoFishHack != null)
+			hax.autoFishHack.setEnabled(false);
+		
+		modsDisabled = true;
 	}
 	
 	private void restoreMods()
 	{
 		if(!modsDisabled)
 			return;
+		
 		var hax = WurstClient.INSTANCE.getHax();
 		
 		// restore previous states
@@ -180,6 +321,16 @@ public final class AvoidStaffHack extends Hack implements UpdateListener
 			hax.triggerBotHack.setEnabled(prevTriggerBot);
 		if(disableKillAura.isChecked())
 			hax.killauraLegitHack.setEnabled(prevKillAura);
+		
+		if(disableChatGptResponder.isChecked()
+			&& hax.chatGptResponderHack != null)
+			hax.chatGptResponderHack.setEnabled(prevChatGptResponder);
+		
+		if(disableAntiAfkFishing.isChecked() && hax.AntiAfkFishingHack != null)
+			hax.AntiAfkFishingHack.setEnabled(prevAntiAfkFishing);
+		
+		if(disableAutoFish.isChecked() && hax.autoFishHack != null)
+			hax.autoFishHack.setEnabled(prevAutoFish);
 		
 		modsDisabled = false;
 	}
