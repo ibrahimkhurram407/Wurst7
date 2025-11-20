@@ -492,4 +492,10 @@ public final class ChatGptResponderHack extends Hack
 			}
 		}
 	}
+	
+	public TextFieldSetting getPromptTemplateSetting()
+	{
+		return promptTemplate;
+	}
+	
 }
