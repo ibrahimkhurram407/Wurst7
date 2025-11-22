@@ -12,6 +12,8 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import net.minecraft.client.network.ClientPlayNetworkHandler;
 import net.minecraft.client.network.PlayerListEntry;
@@ -19,9 +21,9 @@ import net.minecraft.text.Text;
 import net.wurstclient.Category;
 import net.wurstclient.SearchTags;
 import net.wurstclient.WurstClient;
-import net.wurstclient.hack.Hack;
 import net.wurstclient.events.ChatInputListener;
 import net.wurstclient.events.ChatInputListener.ChatInputEvent;
+import net.wurstclient.hack.Hack;
 import net.wurstclient.settings.CheckboxSetting;
 import net.wurstclient.settings.SliderSetting;
 import net.wurstclient.settings.TextFieldSetting;
@@ -39,6 +41,7 @@ public final class ChatGptResponderHack extends Hack
 	
 	/*
 	 * Prompt template.
+	 *
 	 * Placeholders:
 	 * {message} - latest incoming message text
 	 * {sender} - name of the other player (or "Unknown")
@@ -49,9 +52,21 @@ public final class ChatGptResponderHack extends Hack
 	 */
 	private final TextFieldSetting promptTemplate = new TextFieldSetting(
 		"Prompt Template",
-		"Conversation so far:\n{history}\n\n"
-			+ "Now reply concisely (max 2 short sentences) to this Minecraft chat Remember you are {player} and you are fishing and you dont want to be disturbed or want to chat, and if someone says u are autofishing, say that you are not, you are fishing to earn money "
-			+ "from {sender} to {player}: {message}");
+		"You are roleplaying as {player} inside a Minecraft server. "
+			+ "You are peacefully fishing to earn money and you prefer not to chat. "
+			+ "If anyone accuses you of autofishing, you must politely deny it because you are NOT autofishing. "
+			+ "Keep replies short and not suspicious.\n\n"
+			+ "You MUST always answer in this JSON format only:\n" + "{\n"
+			+ "  \"respondToCurrentMessage\": true/false,\n"
+			+ "  \"listenToNextMessageOfThisPlayer\": true/false,\n"
+			+ "  \"messageToSend\": \"your short response here\"\n" + "}\n\n"
+			+ "Rules:\n" + "- Never break JSON.\n"
+			+ "- messageToSend must be a single short sentence.\n"
+			+ "- Set respondToCurrentMessage to false if the message doesn’t require a reply.\n"
+			+ "- Set listenToNextMessageOfThisPlayer to true if you expect a follow-up from this same player.\n\n"
+			+ "Conversation history:\n" + "{history}\n\n"
+			+ "Incoming message:\n" + "From: {sender}\n" + "To: {player}\n"
+			+ "Message: \"{message}\"\n" + "DM: {is_dm}\n");
 	
 	private final CheckboxSetting onlyWhenMentioned = new CheckboxSetting(
 		"Only reply when mentioned",
@@ -112,12 +127,21 @@ public final class ChatGptResponderHack extends Hack
 	// last reply timestamps per sender (lowercased)
 	private final Map<String, Long> lastReplyAt = new HashMap<>();
 	
-	// conversation history (DMs and public mentions)
+	// conversation history (DMs, mentions and listened follow-ups)
 	private static final int MAX_HISTORY_LINES = 40;
 	private final Deque<String> history = new ArrayDeque<>();
 	
+	// which players we should listen to for their *next* message
+	private final Map<String, Boolean> listenNextFrom = new HashMap<>();
+	
 	// ref-counted disabler so overlaps are safe
 	private final ModDisabler modDisabler = new ModDisabler();
+	
+	// regex helpers for JSON parsing
+	private static final Pattern BOOL_PATTERN_TEMPLATE = Pattern
+		.compile("\"%s\"\\s*:\\s*(true|false)", Pattern.CASE_INSENSITIVE);
+	private static final Pattern STRING_PATTERN_TEMPLATE =
+		Pattern.compile("\"%s\"\\s*:\\s*\"(.*?)\"", Pattern.DOTALL);
 	
 	public ChatGptResponderHack()
 	{
@@ -172,9 +196,10 @@ public final class ChatGptResponderHack extends Hack
 	}
 	
 	// Try to detect DMs & extract (sender, message).
+	// Return null for system/announcement lines we want to ignore.
 	private Parsed parse(String raw, String myName)
 	{
-		// [Sender -> me] message
+		// [Sender -> me] message (DM)
 		int b1 = raw.indexOf('[');
 		int b2 = raw.indexOf(']');
 		if(b1 >= 0 && b2 > b1)
@@ -204,7 +229,8 @@ public final class ChatGptResponderHack extends Hack
 				}
 			}
 		}
-		// From <Name>: message
+		
+		// From <Name>: message (DM)
 		if(raw.startsWith("From ") && raw.contains(":"))
 		{
 			int open = raw.indexOf('<');
@@ -216,6 +242,7 @@ public final class ChatGptResponderHack extends Hack
 					raw.substring(close + 1).replaceFirst("^:\\s*", "").trim();
 				return new Parsed(sender, msg, true);
 			}
+			
 			// From Name: message
 			String rest = raw.substring("From ".length());
 			int colon = rest.indexOf(':');
@@ -226,7 +253,8 @@ public final class ChatGptResponderHack extends Hack
 				return new Parsed(sender, msg, true);
 			}
 		}
-		// <Name> message
+		
+		// Vanilla style: <Name> message
 		if(raw.startsWith("<") && raw.indexOf('>') > 1)
 		{
 			int end = raw.indexOf('>');
@@ -234,8 +262,32 @@ public final class ChatGptResponderHack extends Hack
 			String msg = raw.substring(end + 1).trim();
 			return new Parsed(sender, msg, false);
 		}
-		// fallback: public/unknown (no clear player)
-		return new Parsed(null, raw, false);
+		
+		// Custom server format:
+		// e.g. "imperials [IMMORTAL] ibrahimtest » @Reefy192 what u doing"
+		int arrow = raw.indexOf('»');
+		if(arrow > 0)
+		{
+			String left = raw.substring(0, arrow).trim();
+			String msg = raw.substring(arrow + 1).trim();
+			if(!left.isEmpty() && !msg.isEmpty())
+			{
+				String[] parts = left.split("\\s+");
+				String sender = parts[parts.length - 1]; // last token is name
+				return new Parsed(sender, msg, false);
+			}
+		}
+		
+		// Anything else is treated as system/announcement and ignored.
+		return null;
+	}
+	
+	// AI decision parsed from JSON
+	private static final class AiDecision
+	{
+		boolean respondToCurrentMessage;
+		boolean listenToNextMessageOfThisPlayer;
+		String messageToSend;
 	}
 	
 	@Override
@@ -253,52 +305,64 @@ public final class ChatGptResponderHack extends Hack
 		{
 			if(debugLog.isChecked())
 				System.out.println(
-					"[ChatGptResponder] Ignored (own/outgoing DM echo or unknown).");
+					"[ChatGptResponder] Ignored (system/announcement or own DM echo).");
 			return;
 		}
 		
-		// we only want to react to *real players* in the playerlist
-		if(parsed.sender != null && !isRealPlayer(parsed.sender))
-		{
-			if(debugLog.isChecked())
-				System.out.println(
-					"[ChatGptResponder] Ignored (sender not a real player): "
-						+ parsed.sender);
-			return;
-		}
-		
+		// ignore our own public messages
 		if(ignoreOwnMessages.isChecked() && !parsed.isDm)
 		{
+			if(parsed.sender != null && parsed.sender.equalsIgnoreCase(me))
+				return;
 			if(raw.contains("<" + me + ">") || raw.startsWith(me + ":"))
 				return;
 		}
 		
 		boolean mentioned = raw.toLowerCase().contains(me.toLowerCase());
+		String senderName = parsed.sender == null ? "unknown" : parsed.sender;
+		String senderKey = senderName.toLowerCase();
 		
-		// only reply to *player* messages in public when we are mentioned
-		if(!parsed.isDm && onlyWhenMentioned.isChecked() && !mentioned)
-			return;
+		// Did AI previously tell us to listen to this player's next message?
+		boolean listenedFollowup = listenNextFrom.remove(senderKey) != null;
 		
+		// DM gating
 		if(parsed.isDm && !respondToDMs.isChecked())
 			return;
 		
-		// --- record incoming message for history if DM or mention ---
-		if(parsed.isDm || mentioned)
+		// Public gating
+		if(!parsed.isDm)
 		{
-			String senderName =
-				parsed.sender == null ? "Unknown" : parsed.sender;
-			String tag = parsed.isDm ? "DM" : "Public";
-			addHistoryLine("[" + tag + "] " + senderName + ": " + parsed.msg);
+			// if onlyWhenMentioned = true, still react when it's a follow-up
+			if(onlyWhenMentioned.isChecked() && !mentioned && !listenedFollowup)
+				return;
 		}
 		
-		// per-sender cooldown
-		String keyForCooldown =
-			(parsed.sender == null ? "unknown" : parsed.sender.toLowerCase());
+		// --- record incoming message for history if DM or mention or followup
+		// ---
+		if(parsed.isDm || mentioned || listenedFollowup)
+		{
+			String tag;
+			if(parsed.isDm)
+				tag = "DM";
+			else if(listenedFollowup)
+				tag = "PublicFollow";
+			else
+				tag = "Public";
+			
+			addHistoryLine("[" + tag + "] "
+				+ (parsed.sender == null ? "Unknown" : parsed.sender) + ": "
+				+ parsed.msg);
+		}
+		
+		// per-sender cooldown (skip cooldown if this is a follow-up)
 		long now = System.currentTimeMillis();
-		long last = lastReplyAt.getOrDefault(keyForCooldown, 0L);
-		if(now - last < (long)cooldownMs.getValue())
-			return;
-		lastReplyAt.put(keyForCooldown, now);
+		if(!listenedFollowup)
+		{
+			long last = lastReplyAt.getOrDefault(senderKey, 0L);
+			if(now - last < (long)cooldownMs.getValue())
+				return;
+			lastReplyAt.put(senderKey, now);
+		}
 		
 		final boolean replyPrivately = parsed.isDm && parsed.sender != null;
 		final String targetName = parsed.sender;
@@ -307,7 +371,7 @@ public final class ChatGptResponderHack extends Hack
 			(parsed.sender != null ? "@" + parsed.sender + " " : "");
 		final long delay = (long)sendDelayMs.getValue();
 		
-		// ---- TEST MODE ----
+		// ---- TEST MODE (no JSON logic, just echo) ----
 		if(testModeEcho.isChecked())
 		{
 			String reply = sanitizeForChat(textForModel);
@@ -341,7 +405,6 @@ public final class ChatGptResponderHack extends Hack
 						}
 					}
 					
-					// log our reply as part of history
 					addHistoryLine("[Me] " + reply);
 				}catch(InterruptedException ignored)
 				{}finally
@@ -354,7 +417,7 @@ public final class ChatGptResponderHack extends Hack
 			return;
 		}
 		
-		// ---- REAL MODE (OpenAI) ----
+		// ---- REAL MODE (OpenAI with JSON decision) ----
 		final String key =
 			apiKey.getValue() == null ? "" : apiKey.getValue().trim();
 		if(key.isEmpty())
@@ -372,7 +435,8 @@ public final class ChatGptResponderHack extends Hack
 		final String historyBlock = buildHistoryBlock();
 		
 		final String prompt = tpl.replace("{message}", textForModel)
-			.replace("{sender}", targetName == null ? "Unknown" : targetName)
+			.replace("{sender}",
+				parsed.sender == null ? "Unknown" : parsed.sender)
 			.replace("{me}", me).replace("{player}", me)
 			.replace("{is_dm}", Boolean.toString(parsed.isDm))
 			.replace("{history}", historyBlock);
@@ -385,13 +449,48 @@ public final class ChatGptResponderHack extends Hack
 					if(disableMods.isChecked())
 						modDisabler.acquireAndApply();
 					
-					String reply = OpenAIClient.completeChat(key, prompt);
-					reply = sanitizeForChat(reply);
+					String rawReply = OpenAIClient.completeChat(key, prompt);
+					if(rawReply == null || rawReply.isBlank())
+					{
+						if(debugLog.isChecked())
+							System.out.println(
+								"[ChatGptResponder] API returned empty string.");
+						return;
+					}
+					
+					AiDecision decision = parseAiDecision(rawReply);
+					if(decision == null)
+					{
+						if(debugLog.isChecked())
+						{
+							System.out.println(
+								"[ChatGptResponder] Failed to parse JSON from model:");
+							System.out.println(rawReply);
+						}
+						return;
+					}
+					
+					// remember follow-up listener
+					if(decision.listenToNextMessageOfThisPlayer
+						&& parsed.sender != null)
+					{
+						listenNextFrom.put(senderKey, Boolean.TRUE);
+					}
+					
+					if(!decision.respondToCurrentMessage)
+					{
+						if(debugLog.isChecked())
+							System.out.println(
+								"[ChatGptResponder] Model chose not to respond.");
+						return;
+					}
+					
+					String reply = sanitizeForChat(decision.messageToSend);
 					if(reply == null || reply.isBlank())
 					{
 						if(debugLog.isChecked())
 							System.out.println(
-								"[ChatGptResponder] API returned empty/illegal.");
+								"[ChatGptResponder] messageToSend empty after sanitize.");
 						return;
 					}
 					
@@ -422,7 +521,6 @@ public final class ChatGptResponderHack extends Hack
 						}
 					}
 					
-					// record our reply in history
 					addHistoryLine("[Me] " + reply);
 				}catch(Exception e)
 				{
@@ -438,6 +536,8 @@ public final class ChatGptResponderHack extends Hack
 	
 	// ============ Helpers ============
 	
+	// (kept in case you want to use it later, but not used in the logic now)
+	@SuppressWarnings("unused")
 	private boolean isRealPlayer(String name)
 	{
 		if(name == null || MC.getNetworkHandler() == null)
@@ -496,6 +596,49 @@ public final class ChatGptResponderHack extends Hack
 		if(s.length() > 256)
 			s = s.substring(0, 256);
 		return s;
+	}
+	
+	private AiDecision parseAiDecision(String raw)
+	{
+		int start = raw.indexOf('{');
+		int end = raw.lastIndexOf('}');
+		if(start < 0 || end <= start)
+			return null;
+		
+		String json = raw.substring(start, end + 1);
+		
+		AiDecision d = new AiDecision();
+		d.respondToCurrentMessage =
+			extractBoolean(json, "respondToCurrentMessage", false);
+		d.listenToNextMessageOfThisPlayer =
+			extractBoolean(json, "listenToNextMessageOfThisPlayer", false);
+		d.messageToSend = extractString(json, "messageToSend");
+		return d;
+	}
+	
+	private boolean extractBoolean(String json, String key, boolean def)
+	{
+		Pattern p =
+			Pattern.compile(String.format(BOOL_PATTERN_TEMPLATE.pattern(), key),
+				Pattern.CASE_INSENSITIVE);
+		Matcher m = p.matcher(json);
+		if(m.find())
+			return Boolean.parseBoolean(m.group(1).toLowerCase());
+		return def;
+	}
+	
+	private String extractString(String json, String key)
+	{
+		Pattern p = Pattern.compile(
+			String.format(STRING_PATTERN_TEMPLATE.pattern(), key),
+			Pattern.DOTALL);
+		Matcher m = p.matcher(json);
+		if(!m.find())
+			return "";
+		String value = m.group(1);
+		// very light unescape for common sequences
+		value = value.replace("\\\"", "\"").replace("\\\\", "\\");
+		return value;
 	}
 	
 	/**
