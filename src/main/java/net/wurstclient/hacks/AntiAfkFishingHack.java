@@ -73,6 +73,10 @@ public final class AntiAfkFishingHack extends Hack implements UpdateListener
 	private float targetYaw;
 	private boolean movedToSpot;
 	
+	private boolean escapingFromThreat;
+	private int walkTicks;
+	private int nextJumpTick;
+	
 	private boolean autoFishWasEnabled;
 	private boolean walkingToSpot;
 	
@@ -114,6 +118,9 @@ public final class AntiAfkFishingHack extends Hack implements UpdateListener
 		
 		autoFishWasEnabled = false;
 		walkingToSpot = false;
+		escapingFromThreat = false;
+		walkTicks = 0;
+		nextJumpTick = 0;
 		
 		findNewFishingSpot();
 		setTimer();
@@ -140,8 +147,37 @@ public final class AntiAfkFishingHack extends Hack implements UpdateListener
 			{}
 		}
 		
-		walkingToSpot = false;
-		autoFishWasEnabled = false;
+		escapingFromThreat = false;
+		walkTicks = 0;
+		nextJumpTick = 0;
+	}
+	
+	private PlayerEntity getClosestThreat()
+	{
+		if(MC.world == null || MC.player == null)
+			return null;
+		
+		Set<String> ignored = getIgnoredPlayers();
+		double avoidDist = playerAvoidDistance.getValue();
+		Vec3d myPos = MC.player.getPos();
+		PlayerEntity closest = null;
+		double best = avoidDist * avoidDist;
+		
+		for(PlayerEntity p : MC.world.getPlayers())
+		{
+			if(p == MC.player)
+				continue;
+			if(ignored.contains(p.getGameProfile().getName().toLowerCase()))
+				continue;
+			
+			double d = p.getPos().squaredDistanceTo(myPos);
+			if(d < best)
+			{
+				best = d;
+				closest = p;
+			}
+		}
+		return closest;
 	}
 	
 	@Override
@@ -181,11 +217,31 @@ public final class AntiAfkFishingHack extends Hack implements UpdateListener
 		}
 		
 		// Avoid players nearby *only* when we are standing at a spot
-		if(movedToSpot && shouldAvoidPlayers())
+		PlayerEntity threat = getClosestThreat();
+		if(movedToSpot && threat != null)
 		{
-			// Someone came too close -> pick a new spot and start walking there
-			findNewFishingSpot();
+			// Try to find a safe escape spot away from the player
+			BlockPos safe = pickSafeEscapeSpot(threat);
+			
+			if(safe == null)
+			{
+				// Couldn't find a good escape spot – fall back to picking a new
+				// normal fishing spot (near water, using your existing logic)
+				currentFishingSpot = null;
+				findNewFishingSpot();
+				return;
+			}
+			
+			// Use this escape spot as our temporary goal
+			currentFishingSpot = safe;
+			waterTarget = null; // don't keep old water target from previous
+								// spot
+			pathFinder = new FishingPathFinder(safe);
+			processor = null;
+			
 			movedToSpot = false;
+			escapingFromThreat = true;
+			startWalkingToSpot();
 			return;
 		}
 		
@@ -246,6 +302,8 @@ public final class AntiAfkFishingHack extends Hack implements UpdateListener
 	{
 		walkingToSpot = true;
 		autoFishWasEnabled = false;
+		walkTicks = 0;
+		nextJumpTick = 0;
 		
 		try
 		{
@@ -265,16 +323,29 @@ public final class AntiAfkFishingHack extends Hack implements UpdateListener
 		walkingToSpot = false;
 		PathProcessor.releaseControls();
 		
-		if(autoFishWasEnabled)
+		// ALWAYS turn AutoFish back on when we arrive at a spot
+		try
 		{
-			try
-			{
-				var hax = WurstClient.INSTANCE.getHax();
-				if(hax.autoFishHack != null && !hax.autoFishHack.isEnabled())
-					hax.autoFishHack.setEnabled(true);
-			}catch(Throwable ignored)
-			{}
+			var hax = WurstClient.INSTANCE.getHax();
+			if(hax.autoFishHack != null && !hax.autoFishHack.isEnabled())
+				hax.autoFishHack.setEnabled(true);
+		}catch(Throwable ignored)
+		{}
+		
+		// If we just finished an escape, immediately choose a fresh fishing
+		// spot
+		// from the new location (so we end up next to water & facing it).
+		if(escapingFromThreat)
+		{
+			escapingFromThreat = false;
+			currentFishingSpot = null;
+			findNewFishingSpot(); // this will set waterTarget, yaw/pitch, and
+									// start walking again
+			return;
 		}
+		
+		// Normal arrival at a fishing spot: faceWater() will be called from
+		// onUpdate()
 	}
 	
 	private boolean shouldAvoidPlayers()
@@ -661,15 +732,49 @@ public final class AntiAfkFishingHack extends Hack implements UpdateListener
 		// follow the path
 		if(processor != null && !processor.isDone())
 		{
+			MC.player.setSprinting(true);
+			
+			// Fake a bit of human-like jumping while walking straight
+			walkTicks++;
+			
+			// Schedule a random jump every 20–60 ticks (about 1–3 seconds),
+			// only when on the ground so it doesn't spam.
+			if(nextJumpTick == 0)
+				nextJumpTick = 20 + random.nextInt(40); // first jump after some
+														// time
+				
+			if(MC.player.isOnGround() && walkTicks >= nextJumpTick)
+			{
+				MC.player.jump();
+				nextJumpTick = walkTicks + 20 + random.nextInt(40);
+			}
+			
 			processor.process();
 			return false;
 		}
 		
-		// reached end of path successfully
-		if(processor != null && processor.isDone())
+		// follow the path
+		if(processor != null && !processor.isDone())
 		{
-			onArrivedAtSpot();
-			return true;
+			MC.player.setSprinting(true);
+			
+			// Fake a bit of human-like jumping while walking straight
+			walkTicks++;
+			
+			// Schedule a random jump every 20–60 ticks (about 1–3 seconds),
+			// only when on the ground so it doesn't spam.
+			if(nextJumpTick == 0)
+				nextJumpTick = 20 + random.nextInt(40); // first jump after some
+														// time
+				
+			if(MC.player.isOnGround() && walkTicks >= nextJumpTick)
+			{
+				MC.player.jump();
+				nextJumpTick = walkTicks + 20 + random.nextInt(40);
+			}
+			
+			processor.process();
+			return false;
 		}
 		
 		return false;
@@ -699,6 +804,70 @@ public final class AntiAfkFishingHack extends Hack implements UpdateListener
 		
 		float pitchDiff = correctPitch - MC.player.getPitch();
 		MC.player.setPitch(MC.player.getPitch() + pitchDiff * 0.2f);
+	}
+	
+	private BlockPos pickSafeEscapeSpot(PlayerEntity threat)
+	{
+		BlockPos base = MC.player.getBlockPos();
+		Vec3d myPos = MC.player.getPos();
+		Vec3d hisPos = threat.getPos();
+		
+		// Direction directly away from the threat
+		Vec3d away = myPos.subtract(hisPos).normalize();
+		
+		// Try 5 distances: 3, 4, 5, 6, 7 blocks away
+		for(int dist = 3; dist <= 7; dist++)
+		{
+			Vec3d attempt = myPos.add(away.multiply(dist));
+			BlockPos bp = BlockPos.ofFloored(attempt);
+			
+			// Check if this block is safe terrain
+			if(isSafeGround(bp))
+				return bp;
+			
+			// Also check left and right offsets (strafe escape)
+			Vec3d left = away.rotateY((float)Math.toRadians(90));
+			Vec3d right = away.rotateY((float)Math.toRadians(-90));
+			
+			BlockPos leftBp =
+				BlockPos.ofFloored(attempt.add(left.multiply(1.5)));
+			BlockPos rightBp =
+				BlockPos.ofFloored(attempt.add(right.multiply(1.5)));
+			
+			if(isSafeGround(leftBp))
+				return leftBp;
+			if(isSafeGround(rightBp))
+				return rightBp;
+		}
+		
+		// Worst case: no safe escape found
+		return null;
+	}
+	
+	private boolean isSafeGround(BlockPos bp)
+	{
+		if(MC.world == null)
+			return false;
+		
+		BlockPos below = bp.down();
+		BlockState belowState = MC.world.getBlockState(below);
+		
+		// Can't stand on water, lava, slabs, stairs, plants, etc.
+		if(!belowState.isSolidBlock(MC.world, below))
+			return false;
+		
+		// Check head clearance
+		BlockState here = MC.world.getBlockState(bp);
+		BlockState above = MC.world.getBlockState(bp.up());
+		
+		boolean clear = !here.isSolidBlock(MC.world, bp)
+			&& !above.isSolidBlock(MC.world, bp.up());
+		
+		// Avoid water blocks completely
+		if(here.getBlock() == Blocks.WATER || above.getBlock() == Blocks.WATER)
+			return false;
+		
+		return clear;
 	}
 	
 	private void setTimer()

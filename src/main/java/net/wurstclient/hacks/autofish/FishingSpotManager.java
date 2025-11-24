@@ -179,8 +179,20 @@ public final class FishingSpotManager
 	
 	public void onBite(FishingBobberEntity bobber)
 	{
-		boolean samePlayerInput = lastSpot != null
-			&& lastSpot.input().isNearlyIdenticalTo(castPosRot);
+		if(bobber == null || bobber.isRemoved())
+			return;
+		
+		// Safely read current input
+		var currInput = castPosRot;
+		if(currInput == null)
+			return;
+		
+		// Safely read lastSpot input (may be null between ticks)
+		var lastInput = (lastSpot == null ? null : lastSpot.input());
+		
+		boolean samePlayerInput = lastSpot != null && lastInput != null
+			&& lastInput.isNearlyIdenticalTo(currInput);
+		
 		boolean sameBobberPos = lastSpot != null
 			&& isInRange(lastSpot.bobberPos(), bobber.getPos());
 		
@@ -190,10 +202,10 @@ public final class FishingSpotManager
 		else
 			fishCaughtAtLastSpot = 1;
 		
-		// register new fishing spot if input changed
+		// register new fishing spot if input changed OR lastInput was null
 		if(!samePlayerInput)
 		{
-			lastSpot = new FishingSpot(castPosRot, bobber);
+			lastSpot = new FishingSpot(currInput, bobber);
 			fishingSpots.add(lastSpot);
 			return;
 		}
@@ -201,8 +213,11 @@ public final class FishingSpotManager
 		// update last spot if same input led to different bobber position
 		if(!sameBobberPos)
 		{
-			FishingSpot updatedSpot = new FishingSpot(lastSpot.input(), bobber);
-			fishingSpots.remove(lastSpot);
+			FishingSpot updatedSpot = new FishingSpot(currInput, bobber);
+			
+			if(lastSpot != null)
+				fishingSpots.remove(lastSpot);
+			
 			fishingSpots.add(updatedSpot);
 			lastSpot = updatedSpot;
 		}
