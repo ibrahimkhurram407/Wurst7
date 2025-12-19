@@ -20,11 +20,14 @@ import net.minecraft.text.Text;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
+import net.minecraft.entity.EquipmentSlot;
+import net.wurstclient.util.ItemUtils;
 
 import net.wurstclient.Category;
 import net.wurstclient.SearchTags;
 import net.wurstclient.events.UpdateListener;
 import net.wurstclient.hack.Hack;
+import net.wurstclient.settings.CheckboxSetting;
 import net.wurstclient.settings.TextFieldSetting;
 
 @SearchTags({"auto bow storer", "pv storer", "bow stash", "automatic storer"})
@@ -34,14 +37,33 @@ public final class AutoBowPVHack extends Hack implements UpdateListener
 		"PV command", "/pv 1", "Command to open your private vault 1.\n"
 			+ "Example: /pv 1 or /pv 1;open");
 	
+	// What to move
+	private final CheckboxSetting moveBows =
+		new CheckboxSetting("Move Bows", true);
+	private final CheckboxSetting moveSwords =
+		new CheckboxSetting("Move Swords", false);
+	private final CheckboxSetting moveMaces =
+		new CheckboxSetting("Move Maces", false);
+	
+	private final CheckboxSetting moveHelmet =
+		new CheckboxSetting("Move Helmets", false);
+	private final CheckboxSetting moveChestplate =
+		new CheckboxSetting("Move Chestplates", false);
+	private final CheckboxSetting moveLeggings =
+		new CheckboxSetting("Move Leggings", false);
+	private final CheckboxSetting moveBoots =
+		new CheckboxSetting("Move Boots", false);
+	
+	// Optional name filter (for custom items)
+	private final TextFieldSetting nameKeywords = new TextFieldSetting(
+		"Custom name keywords (CSV)", "",
+		"Optional. If set, items whose name contains ANY keyword will be moved.\n"
+			+ "Example: ce bow, god sword, immortal");
+	
 	// ----- State -----
-	// We looted at least one bow and want to open PV
 	private boolean wantingPv = false;
-	// We have sent the PV command and are waiting for the PV GUI to appear
 	private boolean pvPending = false;
-	// We are currently in the PV screen and should deposit bows
 	private boolean inPv = false;
-	// After PV closes, we want to right-click to reopen the last container
 	private boolean reopenAfterPv = false;
 	private int reopenDelay = 0;
 	
@@ -49,7 +71,18 @@ public final class AutoBowPVHack extends Hack implements UpdateListener
 	{
 		super("AutoBowPV");
 		setCategory(Category.OTHER);
+		
 		addSetting(pvCommand);
+		
+		addSetting(moveBows);
+		addSetting(moveSwords);
+		addSetting(moveMaces);
+		addSetting(moveHelmet);
+		addSetting(moveChestplate);
+		addSetting(moveLeggings);
+		addSetting(moveBoots);
+		
+		addSetting(nameKeywords);
 	}
 	
 	@Override
@@ -93,14 +126,12 @@ public final class AutoBowPVHack extends Hack implements UpdateListener
 		// ----- No GUI open -----
 		if(!(MC.currentScreen instanceof HandledScreen<?> screen))
 		{
-			// If PV never opened, cancel pending flag
 			if(pvPending && !inPv)
 			{
 				pvPending = false;
 				wantingPv = false;
 			}
 			
-			// After PV closes, we auto right-click to reopen the chest/menu
 			if(reopenAfterPv)
 			{
 				if(reopenDelay > 0)
@@ -114,55 +145,42 @@ public final class AutoBowPVHack extends Hack implements UpdateListener
 			return;
 		}
 		
-		// From here on, we know some container/menu is open
 		ScreenHandler handler = screen.getScreenHandler();
 		ClientPlayerEntity player = MC.player;
 		
-		// If we were waiting for PV to open and now a container is open,
-		// treat this as the PV GUI.
 		if(pvPending && !inPv)
 		{
 			inPv = true;
 			pvPending = false;
 		}
 		
-		// ---- Mode 1: we are in PV -> dump bows from inventory into PV ----
+		// ---- Mode 1: in PV -> dump selected items from inventory into PV ----
 		if(inPv)
 		{
-			// Try to move bows into PV
-			moveBowsFromPlayerToContainer(handler, player);
+			moveSelectedFromPlayerToContainer(handler, player);
 			
-			// If no bows left in inventory, we're done -> close PV
-			if(countBowsInInventory() == 0)
+			if(countSelectedInInventory() == 0)
 			{
 				player.closeHandledScreen();
 				inPv = false;
 				wantingPv = false;
 				pvPending = false;
 				
-				// Mark that we should reopen the chest by right-clicking
 				reopenAfterPv = true;
-				reopenDelay = 4; // small delay so server has time to close PV
+				reopenDelay = 4;
 			}
 			return;
 		}
 		
-		// ---- Mode 2: normal container (chest, barrel, menu, etc.) ----
-		// Step 1: grab any bows from the container into our inventory
-		int grabbed = moveBowsFromContainerToPlayer(handler, player);
+		// ---- Mode 2: normal container ----
+		int grabbed = moveSelectedFromContainerToPlayer(handler, player);
 		
 		if(grabbed > 0)
-		{
-			// we successfully looted at least one bow
 			wantingPv = true;
-		}
 		
-		// Step 2: if we want PV and we actually have at least one bow in inv,
-		// close the current GUI and open /pv 1
-		if(wantingPv && countBowsInInventory() > 0)
+		if(wantingPv && countSelectedInInventory() > 0)
 		{
 			wantingPv = false;
-			// Close chest menu first so PV opens cleanly
 			player.closeHandledScreen();
 			openPv();
 		}
@@ -180,10 +198,6 @@ public final class AutoBowPVHack extends Hack implements UpdateListener
 		pvPending = true;
 	}
 	
-	/**
-	 * After PV is done, right-click in front of the player to reopen
-	 * the chest/menu they're looking at.
-	 */
 	private void rightClickFront()
 	{
 		if(MC.player == null || MC.interactionManager == null)
@@ -191,28 +205,22 @@ public final class AutoBowPVHack extends Hack implements UpdateListener
 		
 		HitResult target = MC.crosshairTarget;
 		if(target instanceof BlockHitResult bhr)
-		{
-			// Right-click block under crosshair
 			MC.interactionManager.interactBlock(MC.player, Hand.MAIN_HAND, bhr);
-		}else
-		{
-			// Fallback: right-click with item in hand
+		else
 			MC.interactionManager.interactItem(MC.player, Hand.MAIN_HAND);
-		}
 	}
 	
-	private int moveBowsFromContainerToPlayer(ScreenHandler h,
+	private int moveSelectedFromContainerToPlayer(ScreenHandler h,
 		ClientPlayerEntity player)
 	{
 		int moved = 0;
 		int total = h.slots.size();
-		int playerStart = Math.max(0, total - 36); // last 36 slots = player
+		int playerStart = Math.max(0, total - 36);
 		
-		// container slots are [0, playerStart)
 		for(int i = 0; i < playerStart; i++)
 		{
 			ItemStack st = h.getSlot(i).getStack();
-			if(st.isEmpty() || !isBow(st))
+			if(st.isEmpty() || !shouldMove(st))
 				continue;
 			
 			MC.interactionManager.clickSlot(h.syncId, i, 1,
@@ -222,18 +230,17 @@ public final class AutoBowPVHack extends Hack implements UpdateListener
 		return moved;
 	}
 	
-	private int moveBowsFromPlayerToContainer(ScreenHandler h,
+	private int moveSelectedFromPlayerToContainer(ScreenHandler h,
 		ClientPlayerEntity player)
 	{
 		int moved = 0;
 		int total = h.slots.size();
-		int playerStart = Math.max(0, total - 36); // last 36 slots = player
+		int playerStart = Math.max(0, total - 36);
 		
-		// player slots are [playerStart, total)
 		for(int i = playerStart; i < total; i++)
 		{
 			ItemStack st = h.getSlot(i).getStack();
-			if(st.isEmpty() || !isBow(st))
+			if(st.isEmpty() || !shouldMove(st))
 				continue;
 			
 			MC.interactionManager.clickSlot(h.syncId, i, 1,
@@ -243,24 +250,78 @@ public final class AutoBowPVHack extends Hack implements UpdateListener
 		return moved;
 	}
 	
-	private int countBowsInInventory()
+	private int countSelectedInInventory()
 	{
 		int c = 0;
 		var inv = MC.player.getInventory();
-		int limit = Math.min(inv.size(), 36); // main + hotbar
+		int limit = Math.min(inv.size(), 36);
 		
 		for(int i = 0; i < limit; i++)
 		{
 			ItemStack st = inv.getStack(i);
 			if(st.isEmpty())
 				continue;
-			if(isBow(st))
+			if(shouldMove(st))
 				c += st.getCount();
 		}
 		return c;
 	}
 	
-	// ===== Item matching =====
+	// ===== Matching =====
+	
+	private boolean shouldMove(ItemStack st)
+	{
+		if(st == null || st.isEmpty())
+			return false;
+		
+		Item it = st.getItem();
+		
+		// Optional keyword override (moves ANY item whose name matches)
+		if(matchesKeyword(st))
+			return true;
+		
+		if(moveBows.isChecked() && isBow(st))
+			return true;
+		
+		if(moveSwords.isChecked()
+			&& (it == Items.WOODEN_SWORD || it == Items.STONE_SWORD
+				|| it == Items.IRON_SWORD || it == Items.GOLDEN_SWORD
+				|| it == Items.DIAMOND_SWORD || it == Items.NETHERITE_SWORD))
+			return true;
+		
+		if(moveMaces.isChecked() && it == Items.MACE)
+			return true;
+		
+		if(moveHelmet.isChecked() && isHelmet(st))
+			return true;
+		
+		if(moveChestplate.isChecked() && isChestplate(st))
+			return true;
+		
+		if(moveLeggings.isChecked() && isLeggings(st))
+			return true;
+		
+		if(moveBoots.isChecked() && isBoots(st))
+			return true;
+		
+		return false;
+	}
+	
+	private boolean matchesKeyword(ItemStack st)
+	{
+		String csv = nameKeywords.getValue();
+		if(csv == null || csv.trim().isEmpty())
+			return false;
+		
+		String name = safeName(st).toLowerCase(Locale.ROOT);
+		for(String k : csv.split(","))
+		{
+			String kk = k.trim().toLowerCase(Locale.ROOT);
+			if(!kk.isEmpty() && name.contains(kk))
+				return true;
+		}
+		return false;
+	}
 	
 	private boolean isBow(ItemStack st)
 	{
@@ -277,6 +338,26 @@ public final class AutoBowPVHack extends Hack implements UpdateListener
 		String n = safeName(st).toLowerCase(Locale.ROOT);
 		// loosen this if your server uses funky names
 		return n.contains(" bow");
+	}
+	
+	private boolean isHelmet(ItemStack st)
+	{
+		return ItemUtils.getArmorSlot(st.getItem()) == EquipmentSlot.HEAD;
+	}
+	
+	private boolean isChestplate(ItemStack st)
+	{
+		return ItemUtils.getArmorSlot(st.getItem()) == EquipmentSlot.CHEST;
+	}
+	
+	private boolean isLeggings(ItemStack st)
+	{
+		return ItemUtils.getArmorSlot(st.getItem()) == EquipmentSlot.LEGS;
+	}
+	
+	private boolean isBoots(ItemStack st)
+	{
+		return ItemUtils.getArmorSlot(st.getItem()) == EquipmentSlot.FEET;
 	}
 	
 	// ===== Small utils =====
