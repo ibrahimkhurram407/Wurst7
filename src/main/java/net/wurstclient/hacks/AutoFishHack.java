@@ -213,7 +213,22 @@ public final class AutoFishHack extends Hack
 		{
 			shallowWaterWarning.checkWaterType();
 			reelInTimer = catchDelay.getValueI();
-			fishingSpots.onBite(MC.player.fishHook);
+			
+			var hook = (MC.player == null) ? null : MC.player.fishHook;
+			if(hook != null && !hook.isRemoved())
+			{
+				try
+				{
+					fishingSpots.onBite(hook);
+				}catch(Throwable t)
+				{
+					// swallow to avoid client crash if a spot invalidates
+					// mid-tick
+					// (optional) WURST.getLogger().warn("AutoFish bite handling
+					// failed", t);
+				}
+			}
+			
 			biteDetected = false;
 			
 			// also reel in if an entity was hooked
