@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2025 Wurst-Imperium and contributors.
+ * Copyright (c) 2014-2026 Wurst-Imperium and contributors.
  *
  * This source code is subject to the terms of the GNU General Public
  * License, version 3. If a copy of the GPL was not distributed with this
@@ -40,6 +40,7 @@ import net.wurstclient.settings.TextFieldSetting;
 import net.wurstclient.util.InventoryUtils;
 import net.wurstclient.WurstClient;
 import net.wurstclient.mixinterface.IMinecraftClient;
+import net.wurstclient.util.RotationUtils;
 
 @SearchTags({"auto mace", "wind burst", "auto-elytra", "auto-use"})
 public final class AutoMaceBlatantHack extends Hack
@@ -239,6 +240,28 @@ public final class AutoMaceBlatantHack extends Hack
 		}
 	}
 	
+	private static void faceVecClient(Vec3d target)
+	{
+		if(MC.player == null)
+			return;
+		
+		Vec3d eyes = RotationUtils.getEyesPos(); // your project already has
+													// this
+		Vec3d diff = target.subtract(eyes);
+		
+		double dx = diff.x;
+		double dy = diff.y;
+		double dz = diff.z;
+		
+		double distXZ = Math.sqrt(dx * dx + dz * dz);
+		
+		float yaw = (float)(Math.toDegrees(Math.atan2(dz, dx)) - 90.0);
+		float pitch = (float)(-Math.toDegrees(Math.atan2(dy, distXZ)));
+		
+		MC.player.setYaw(yaw);
+		MC.player.setPitch(pitch);
+	}
+	
 	/**
 	 * Equip Netherite->Diamond->Iron by selecting it into hand and
 	 * right-clicking (server swaps chest).
@@ -341,6 +364,14 @@ public final class AutoMaceBlatantHack extends Hack
 	}
 	
 	/** Use wind burst by clicking the block directly below the player. */
+	/**
+	 * Use wind burst by clicking the block directly below the player, with
+	 * forced rotation.
+	 */
+	/**
+	 * Use wind burst by clicking the block directly below the player, forced to
+	 * be vertical.
+	 */
 	private boolean tryWindBurstAtFeet()
 	{
 		if(MC.player == null)
@@ -366,16 +397,40 @@ public final class AutoMaceBlatantHack extends Hack
 		}
 		
 		BlockPos below = MC.player.getBlockPos().down();
-		Vec3d hitVec = Vec3d.ofCenter(below);
+		
+		// Feet-aligned top-face hit point (prevents sideways bias)
+		Vec3d hitVec = new Vec3d(MC.player.getX(), below.getY() + 1.0 - 1.0e-3,
+			MC.player.getZ());
+		
+		// Save current rotation (optional: prevents visible camera snap)
+		float oldYaw = MC.player.getYaw();
+		float oldPitch = MC.player.getPitch();
+		
 		try
 		{
+			// Force rotation toward the feet hit point
+			faceVecClient(hitVec);
+			// sendLookPacketIfPossible(); // optional; safe no-op if it fails
+			
+			// Use wind burst on the top face
 			IMC.getInteractionManager().rightClickBlock(below, Direction.UP,
 				hitVec);
+			return true;
+			
 		}catch(Throwable t)
 		{
 			return false;
+			
+		}finally
+		{
+			// Restore camera (optional)
+			try
+			{
+				MC.player.setYaw(oldYaw);
+				MC.player.setPitch(oldPitch);
+			}catch(Throwable ignored)
+			{}
 		}
-		return true;
 	}
 	
 	private void tryAutoHitNearby(Set<String> ignoreSet)

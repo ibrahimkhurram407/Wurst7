@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2025 Wurst-Imperium and contributors.
+ * Copyright (c) 2014-2026 Wurst-Imperium and contributors.
  *
  * This source code is subject to the terms of the GNU General Public
  * License, version 3. If a copy of the GPL was not distributed with this
@@ -132,7 +132,7 @@ public final class WindPearlHack extends Hack implements UpdateListener
 					TimeUnit.MILLISECONDS.toNanos(delayMs.getValueI());
 				if(System.nanoTime() - t0ns >= waitNs)
 				{
-					tryWindBurstAtFeet(); // best-effort; even if it fails we
+					tryWindBurstStraightUp();
 					// end
 					phase = Phase.BURSTED;
 				}
@@ -147,6 +147,48 @@ public final class WindPearlHack extends Hack implements UpdateListener
 		}
 	}
 	
+	private static void faceVecClient(Vec3d target)
+	{
+		if(MC.player == null)
+			return;
+		
+		// If your project has RotationUtils.getEyesPos(), prefer that.
+		Vec3d eyes;
+		try
+		{
+			eyes = net.wurstclient.util.RotationUtils.getEyesPos();
+		}catch(Throwable t)
+		{
+			eyes = MC.player.getEyePos();
+		}
+		
+		Vec3d diff = target.subtract(eyes);
+		
+		double dx = diff.x;
+		double dy = diff.y;
+		double dz = diff.z;
+		
+		double distXZ = Math.sqrt(dx * dx + dz * dz);
+		
+		float yaw = (float)(Math.toDegrees(Math.atan2(dz, dx)) - 90.0);
+		float pitch = (float)(-Math.toDegrees(Math.atan2(dy, distXZ)));
+		
+		MC.player.setYaw(yaw);
+		MC.player.setPitch(pitch);
+	}
+	
+	private static void lookStraightUp()
+	{
+		if(MC.player == null)
+			return;
+			
+		// Optional: stabilize yaw too (doesn't matter for straight up, but
+		// avoids weirdness in some clones)
+		// MC.player.setYaw(MC.player.getYaw());
+		
+		MC.player.setPitch(-90.0F);
+	}
+	
 	private boolean throwPearl()
 	{
 		Predicate<ItemStack> isPearl =
@@ -155,23 +197,43 @@ public final class WindPearlHack extends Hack implements UpdateListener
 		if(!InventoryUtils.selectItem(isPearl, 36, true))
 			return false;
 		
+		float oldYaw = MC.player.getYaw();
+		float oldPitch = MC.player.getPitch();
+		
 		try
 		{
-			IMC.getInteractionManager().rightClickItem();
-		}catch(Throwable t)
+			// Always throw straight up
+			lookStraightUp();
+			// sendLookPacketIfPossible(); // optional
+			
+			try
+			{
+				IMC.getInteractionManager().rightClickItem();
+			}catch(Throwable t)
+			{
+				try
+				{
+					MC.interactionManager.interactItem(MC.player,
+						Hand.MAIN_HAND);
+				}catch(Throwable ignored)
+				{}
+			}
+			
+			return true;
+			
+		}finally
 		{
 			try
 			{
-				MC.interactionManager.interactItem(MC.player, Hand.MAIN_HAND);
+				MC.player.setYaw(oldYaw);
+				MC.player.setPitch(oldPitch);
 			}catch(Throwable ignored)
 			{}
 		}
-		return true;
 	}
 	
-	private void tryWindBurstAtFeet()
+	private void tryWindBurstStraightUp()
 	{
-		// Prefer actual WIND_CHARGE; fall back to name contains "wind"
 		Predicate<ItemStack> isWind =
 			s -> s != null && !s.isEmpty() && (s.isOf(Items.WIND_CHARGE)
 				|| s.getName().getString().toLowerCase().contains("wind"));
@@ -179,20 +241,42 @@ public final class WindPearlHack extends Hack implements UpdateListener
 		if(!InventoryUtils.selectItem(isWind, 36, true))
 			return;
 		
+		float oldYaw = MC.player.getYaw();
+		float oldPitch = MC.player.getPitch();
+		
 		try
 		{
+			// Force look straight up during the use
+			lookStraightUp();
+			// sendLookPacketIfPossible(); // optional (helps if server cares)
+			
 			BlockPos below = MC.player.getBlockPos().down();
-			Vec3d at = Vec3d.ofCenter(below);
+			
+			// Click the TOP face of the block below you.
+			// Keep the hitVec on the top face; "straight up" is enforced by
+			// rotation above.
+			Vec3d hitVec = new Vec3d(MC.player.getX(),
+				below.getY() + 1.0 - 1.0e-3, MC.player.getZ());
+			
 			IMC.getInteractionManager().rightClickBlock(below, Direction.UP,
-				at);
+				hitVec);
+			
 		}catch(Throwable t)
 		{
-			// optional fallback: generic right click
 			try
 			{
 				IMC.getInteractionManager().rightClickItem();
 			}catch(Throwable ignored)
 			{}
+		}finally
+		{
+			try
+			{
+				MC.player.setYaw(oldYaw);
+				MC.player.setPitch(oldPitch);
+			}catch(Throwable ignored)
+			{}
 		}
 	}
+	
 }
